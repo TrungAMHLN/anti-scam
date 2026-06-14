@@ -1,5 +1,5 @@
 {
-  "name": "ChongLuaDao",
+  "name": "AntiScam",
   "version": "1.0.3",
   "description": "Tiện ích giúp bảo vệ bạn khỏi các trang web có nguy cơ lừa đảo, giả mạo, có nội dung xấu hoặc phần mềm độc hại.",
   "homepage_url": "https://chongluadao.vn/",
@@ -23,7 +23,15 @@
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
-      "js": ["js/jquery.js", "js/features.js"]
+      "js": [
+        "js/jquery.js",
+        "js/psl.min.js",
+        "js/engines/url-intelligence.js",
+        "js/engines/brand-detection.js",
+        "js/engines/website-intelligence.js",
+        "js/features.js"
+      ],
+      "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
@@ -34,10 +42,10 @@
   ],
   "incognito": "split",
   "icons": {
-    "16": "assets/cldvn16.png",
-    "32": "assets/cldvn32.png",
-    "48": "assets/cldvn48.png",
-    "128": "assets/cldvn128.png"
+    "16": "assets/antiScamLogo.png",
+    "32": "assets/antiScamLogo.png",
+    "48": "assets/antiScamLogo.png",
+    "128": "assets/antiScamLogo.png"
   },
   "manifest_version": 3
 }

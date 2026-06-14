@@ -1,100 +1,169 @@
 /*global chrome*/
 /*global $*/
 
-// MV3: Không dùng chrome.extension.getBackgroundPage() nữa
-// Thay bằng chrome.runtime.sendMessage để lấy state từ service worker
-
-const colors = {
-  '-1': '#28a745',
-  '0': '#ffeb3c',
-  '1': '#cc0000'
+const RISK_COLORS = {
+  ANALYZING: { color: '#60a5fa', class: 'text-loading' },
+  SAFE: { color: '#10b981', class: 'text-safe' },
+  LOW: { color: '#10b981', class: 'text-safe' },
+  MEDIUM: { color: '#f59e0b', class: 'text-medium' },
+  HIGH: { color: '#f97316', class: 'text-high' },
+  CRITICAL: { color: '#ef4444', class: 'text-critical' },
 };
 
-[...document.getElementsByClassName('collapsible')].forEach((el) => {
-  el.addEventListener('click', function () {
-    this.classList.toggle('active');
-    const content = this.nextElementSibling;
-    if (content.style.maxHeight) {
-      content.style.maxHeight = null;
-    } else {
-      content.style.maxHeight = `${content.scrollHeight}px`;
-    }
-  });
-});
+
+
+function updateCircleStroke(score, riskLevel) {
+  const path = document.getElementById('score_path');
+  const color = RISK_COLORS[riskLevel]?.color || '#10b981';
+  
+  // path length for this circle is ~100
+  // value from 0 to 100
+  setTimeout(() => {
+    path.style.stroke = color;
+    path.setAttribute('stroke-dasharray', `${score}, 100`);
+  }, 100);
+}
+
+function createModuleCard(name, data) {
+  // data === undefined: engine chưa chạy xong (still scanning)
+  // data === null: engine lỗi
+  // data && score defined: đã có kết quả
+  if (data === undefined || data === null) {
+    const label = data === null ? 'Không khả dụng' : 'Đang quét...';
+    const cls = data === null ? 'text-medium' : 'text-loading';
+    return `
+      <div class="module-card">
+        <div class="module-name">${name}</div>
+        <div class="module-status ${cls}">${label}</div>
+      </div>
+    `;
+  }
+  if (typeof data.score === 'undefined') {
+    return `
+      <div class="module-card">
+        <div class="module-name">${name}</div>
+        <div class="module-status text-loading">Đang quét...</div>
+      </div>
+    `;
+  }
+  const riskLevel = data.riskLevel || 'SAFE';
+  const colorClass = RISK_COLORS[riskLevel]?.class || 'text-safe';
+  
+  let statusText = 'An Toàn';
+  if (riskLevel === 'MEDIUM') statusText = 'Cảnh báo';
+  if (riskLevel === 'HIGH') statusText = 'Nguy hiểm';
+  if (riskLevel === 'CRITICAL') statusText = 'Rất nguy hiểm';
+
+  return `
+    <div class="module-card">
+      <div class="module-name">${name}</div>
+      <div class="module-status ${colorClass}">${statusText}</div>
+    </div>
+  `;
+}
 
 chrome.tabs.query({currentWindow: true, active: true}, ([tab,]) => {
+  if (!tab) return;
   const tabId = tab.id;
-  const url = new URL(tab.url);
+  let url;
+  try {
+    url = new URL(tab.url);
+  } catch (_e) {
+    // Tab URL là chrome://, about:, hoặc undefined
+    return;
+  }
   const domain = url.hostname;
 
-  // Display nothing if protocol is neither http or https
   if (!['https:', 'http:'].includes(url.protocol)) {
-    $('#pluginBody').hide();
-    $('#domain_url').text(domain);
+    $('#pluginBody').removeClass('hidden');
+    $('#domain_url').text(domain || tab.url);
+    $('#site_msg').text('Không thể phân tích trang này (Chrome/Local).');
     return;
   }
 
-  // MV3: Lấy state từ service worker qua message
-  chrome.runtime.sendMessage({type: 'GET_STATE'}, (background) => {
-    if (!background) {
-      $('#domain_url').text(domain);
-      return;
-    }
+  // ─── FIX: Dedup re-renders — chỉ render khi dữ liệu thực sự thay đổi
+  let lastRenderedKey = null;
 
-    if (background.isWhiteList[tabId] == domain) {
-      $('#pluginBody').hide();
-      $('#isSafe').show();
-      $('#isSafe .site-url').text(domain);
+  function renderDashboard() {
+    chrome.runtime.sendMessage({type: 'GET_STATE', tabId: tabId}, (background) => {
+      if (!background) return;
 
-      // MV3: chrome.action thay cho chrome.browserAction
-      chrome.action.setIcon({
-        path: '../assets/cldvn128.png',
-        tabId
-      });
+      const finalRisk = background.finalRisk[tabId] || {
+        finalScore: 0,
+        riskLevel: 'ANALYZING',
+        explanation: 'Hệ thống đang tiến hành phân tích các chỉ số bảo mật...'
+      };
 
-    } else if(background.isBlocked[tabId] == domain){
-      $('#pluginBody').hide();
-      $('#isPhishing').show();
-      $('#isPhishing .site-url').text(background.isBlocked[tabId]);
+      // Kiểm tra xem có data mới để render không
+      const completedModules = [
+        background.urlIntel && background.urlIntel[tabId],
+        background.domainIntel && background.domainIntel[tabId],
+        background.sslIntel && background.sslIntel[tabId],
+        background.websiteIntel && background.websiteIntel[tabId],
+        background.brandIntel && background.brandIntel[tabId],
+        background.threatIntel && background.threatIntel[tabId]
+      ].filter(x => x).length;
 
-      chrome.action.setIcon({
-        path: '../assets/cldvn_red.png',
-        tabId
-      });
-    } else {
-      const result = background.results[tabId];
-      const isPhish = background.isPhish[tabId];
-      const legitimatePercent = background.legitimatePercents[tabId];
-
-      for (const key in result) {
-        const newFeature = document.createElement('li');
-        newFeature.textContent = key;
-        newFeature.style.backgroundColor = colors[result[key]];
-        const featureList = document.getElementById('features');
-        featureList.appendChild(newFeature);
+      const renderKey = `${finalRisk.riskLevel}_${finalRisk.finalScore}_${completedModules}`;
+      if (renderKey === lastRenderedKey) {
+        return; // Dữ liệu không thay đổi, bỏ qua render
       }
+      lastRenderedKey = renderKey;
 
-      const phishingMessage = isPhish ? 'Website này có thể không an toàn.' : 'Website này có thể an toàn.';
+      if (background.isWhiteList[tabId] == domain) {
+        $('#pluginBody').addClass('hidden');
+        $('#isPhishing').addClass('hidden');
+        $('#isSafe').removeClass('hidden');
+        $('#isSafe .site-url').text(domain);
+        chrome.action.setIcon({ path: '/assets/antiScamLogo.png', tabId });
+      } else if (background.isBlocked[tabId] == domain) {
+        $('#pluginBody').addClass('hidden');
+        $('#isSafe').addClass('hidden');
+        $('#isPhishing').removeClass('hidden');
+        $('#isPhishing .site-url').text(domain);
+        chrome.action.setIcon({ path: '/assets/antiScamLogo.png', tabId });
+      } else {
+        $('#isSafe').addClass('hidden');
+        $('#isPhishing').addClass('hidden');
+        $('#pluginBody').removeClass('hidden');
+        $('#domain_url').text(domain);
 
-      const site_score = document.getElementById('site_score');
-      const percentage_content = document.getElementById('percentage_content');
-      const site_msg = document.getElementById('site_msg');
-      percentage_content.classList.add(`p${parseInt(legitimatePercent)}`);
+        const { finalScore, riskLevel, explanation } = finalRisk;
+        
+        $('#site_score').text(isNaN(finalScore) ? '--' : finalScore);
+        updateCircleStroke(isNaN(finalScore) ? 0 : finalScore, riskLevel);
 
-      if (isPhish) {
-        percentage_content.classList.add('orange');
-        site_score.classList.add('warning');
-        site_msg.classList.add('warning');
+        const riskColorClass = RISK_COLORS[riskLevel]?.class || 'text-safe';
+        let riskText = 'AN TOÀN';
+        if (riskLevel === 'ANALYZING') riskText = 'ĐANG PHÂN TÍCH...';
+        else if (riskLevel === 'MEDIUM') riskText = 'NGHI NGỜ';
+        else if (riskLevel === 'HIGH') riskText = 'NGUY HIỂM';
+        else if (riskLevel === 'CRITICAL') riskText = 'RẤT NGUY HIỂM';
+
+        $('#risk_label').text(riskText).removeClass().addClass('risk-label').addClass(riskColorClass);
+        $('#site_msg').text(explanation);
+
+        // Render module cards
+        let cardsHtml = '';
+        cardsHtml += createModuleCard('URL Intel', background.urlIntel[tabId]);
+        cardsHtml += createModuleCard('Domain Intel', background.domainIntel[tabId]);
+        cardsHtml += createModuleCard('SSL Intel', background.sslIntel[tabId]);
+        cardsHtml += createModuleCard('Website Intel', background.websiteIntel[tabId]);
+        cardsHtml += createModuleCard('Brand Detection', background.brandIntel[tabId]);
+        cardsHtml += createModuleCard('Threat Intel', background.threatIntel[tabId]);
+        
+        $('#engines_grid').html(cardsHtml);
       }
-      else {
-        site_score.classList.add('safe');
-        site_msg.classList.add('safe');
-      }
+    });
+  }
 
-      const percentage  = parseInt(legitimatePercent);
-      $('#site_msg').text(isNaN(percentage) ? '...' : phishingMessage);
-      $('#site_score').text(isNaN(percentage) ? '...' : `${parseInt(legitimatePercent) - 1}%`);
-      $('#domain_url').text(domain);
+  // Render immediately
+  renderDashboard();
+
+  // Listen for real-time updates from background service worker
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message.type === 'STATE_UPDATED' && message.tabId === tabId) {
+      renderDashboard();
     }
   });
 });

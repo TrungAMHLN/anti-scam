@@ -4,11 +4,39 @@
 // const CLOSE_TAB_PORT_NAME = 'CLOSE_TAB_PORT_NAME';
 const ML_PORT_NAME = 'ML_PORT_NAME';
 
-/*
-$('a').click(function(){
-    alert("You are about to go to "+$(this).attr('href'));
-});
-*/
+// ─── BƯỚC 4 & 5: PERFORMANCE PROFILER & TELEMETRY
+const Profiler = {
+  start(name) {
+    console.log(`[AntiScam Profiler] [START] ${name}`);
+    return performance.now();
+  },
+  end(name, startTime) {
+    const elapsed = (performance.now() - startTime).toFixed(2);
+    console.log(`[AntiScam Profiler] [END] ${name} ${elapsed}ms`);
+  }
+};
+
+// ─── URL Intelligence Integration ───────────────────────────────────────────
+// url-intelligence.js đã chạy trước và đặt kết quả vào window.antiScamURLIntel
+// Nếu chưa có (ví dụ engine bị lỗi), ta dùng object rỗng để tránh crash
+const urlIntel = (typeof window !== 'undefined' && window.antiScamURLIntel) || {
+  score: 0,
+  riskLevel: 'SAFE',
+  explanation: '',
+  entropy: 0,
+  homograph: { detected: false },
+  typosquatting: { isTyposquatting: false, isOfficialDomain: false, targetBrand: null, similarity: 0 },
+  suspiciousTLD: { suspicious: false, tld: '' },
+  urlShortener: { isShortened: false },
+  subdomainAbuse: { detected: false, findings: [] },
+  suspiciousKeywords: { detected: false, keywords: [], count: 0 },
+  redirectIndicators: { detected: false, indicators: [] },
+};
+
+// ─── FIX PERF: Không gọi analyzeWebsite() ngay (blocking DOM scan)
+// Sẽ chạy defer sau khi gửi message đầu tiên
+let websiteIntel = { score: 0, riskLevel: 'SAFE', explanation: '' };
+let brandIntel = { score: 0, riskLevel: 'SAFE', explanation: '' };
 
 const result = {};
 //---------------------- 1.  IP Address  ----------------------
@@ -290,11 +318,48 @@ if (iframes.length == 0) {
   result['iFrames'] = '1';
 }
 
-//---------------------- Sending the result  ----------------------
+// ─── Phase 1: Gửi ngay kết quả URL-based (< 50ms, không cần chờ DOM scan nặng)
 const mlPort = chrome.runtime.connect({name: ML_PORT_NAME});
-mlPort.postMessage({request: result});
+mlPort.postMessage({
+  request: result,
+  urlIntel: urlIntel,
+  websiteIntel: websiteIntel,
+  brandIntel: brandIntel,
+});
 
-chrome.runtime.onMessage.addListener((tab) => {
-  result['tab'] = tab;
-  mlPort.postMessage({request: result});
+// ─── Phase 2: Chạy DOM scan nặng sau (defer qua setTimeout(0))
+// analyzeWebsite() và BrandDetection có thể tốn 50-200ms trên page lớn như YouTube
+setTimeout(() => {
+  const _currentHostname = (typeof window !== 'undefined') ? window.location.hostname : '';
+
+  const startWeb = Profiler.start('Website Analysis (DOM)');
+  const _websiteIntel = (typeof window !== 'undefined' && window.WebsiteIntelligence &&
+    window.WebsiteIntelligence.analyzeWebsite()) || { score: 0, riskLevel: 'SAFE', explanation: '' };
+  Profiler.end('Website Analysis (DOM)', startWeb);
+
+  const startBrand = Profiler.start('Brand Analysis (DOM)');
+  const _brandIntel = (typeof window !== 'undefined' && window.BrandDetection &&
+    window.BrandDetection.detectBrandImpersonation(_currentHostname)) || { score: 0, riskLevel: 'SAFE', explanation: '' };
+  Profiler.end('Brand Analysis (DOM)', startBrand);
+
+  // Luôn gửi update kết quả DOM scan lên background để UI biết là đã phân tích xong
+  mlPort.postMessage({
+    request: result,
+    urlIntel: urlIntel,
+    websiteIntel: _websiteIntel,
+    brandIntel: _brandIntel,
+  });
+}, 0);
+
+// ─── Lắng nghe yêu cầu gửi lại dữ liệu từ background (khi Service Worker thức dậy)
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg && msg.type === 'RESEND_INTEL') {
+    const port = chrome.runtime.connect({name: ML_PORT_NAME});
+    port.postMessage({
+      request: result,
+      urlIntel: urlIntel,
+      websiteIntel: typeof window !== 'undefined' && window.WebsiteIntelligence ? window.WebsiteIntelligence.analyzeWebsite() : websiteIntel,
+      brandIntel: typeof window !== 'undefined' && window.BrandDetection ? window.BrandDetection.detectBrandImpersonation(window.location.hostname) : brandIntel,
+    });
+  }
 });
