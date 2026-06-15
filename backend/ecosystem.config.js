@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: 'Chongluadao_v1',
+      name: 'AntiScam_v1',
       exec_mode: 'cluster',
       instances: 'max', // Or a number of instances,
       instance_var: 'INSTANCE_ID',

@@ -1,16 +1,16 @@
 {
-  "name": "chongluadao.vn.backend",
+  "name": "antiscam.vn.backend",
   "version": "1.0.0",
-  "description": "chongluadao.vn backend",
+  "description": "antiscam.vn backend",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "nodemon index.js"
   },
   "keywords": [
-    "chongluadao.vn"
+    "antiscam.vn"
   ],
-  "author": "chongluadao.vn",
+  "author": "antiscam.vn",
   "license": "ISC",
   "dependencies": {
     "axios": "^0.21.1",

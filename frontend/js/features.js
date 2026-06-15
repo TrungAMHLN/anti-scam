@@ -1,42 +1,10 @@
 /*global chrome*/
 
-// const REDIRECT_PORT_NAME = 'REDIRECT_PORT_NAME';
-// const CLOSE_TAB_PORT_NAME = 'CLOSE_TAB_PORT_NAME';
-const ML_PORT_NAME = 'ML_PORT_NAME';
-
-// ─── BƯỚC 4 & 5: PERFORMANCE PROFILER & TELEMETRY
-const Profiler = {
-  start(name) {
-    console.log(`[AntiScam Profiler] [START] ${name}`);
-    return performance.now();
-  },
-  end(name, startTime) {
-    const elapsed = (performance.now() - startTime).toFixed(2);
-    console.log(`[AntiScam Profiler] [END] ${name} ${elapsed}ms`);
-  }
-};
-
-// ─── URL Intelligence Integration ───────────────────────────────────────────
-// url-intelligence.js đã chạy trước và đặt kết quả vào window.antiScamURLIntel
-// Nếu chưa có (ví dụ engine bị lỗi), ta dùng object rỗng để tránh crash
-const urlIntel = (typeof window !== 'undefined' && window.antiScamURLIntel) || {
-  score: 0,
-  riskLevel: 'SAFE',
-  explanation: '',
-  entropy: 0,
-  homograph: { detected: false },
-  typosquatting: { isTyposquatting: false, isOfficialDomain: false, targetBrand: null, similarity: 0 },
-  suspiciousTLD: { suspicious: false, tld: '' },
-  urlShortener: { isShortened: false },
-  subdomainAbuse: { detected: false, findings: [] },
-  suspiciousKeywords: { detected: false, keywords: [], count: 0 },
-  redirectIndicators: { detected: false, indicators: [] },
-};
-
-// ─── FIX PERF: Không gọi analyzeWebsite() ngay (blocking DOM scan)
-// Sẽ chạy defer sau khi gửi message đầu tiên
-let websiteIntel = { score: 0, riskLevel: 'SAFE', explanation: '' };
-let brandIntel = { score: 0, riskLevel: 'SAFE', explanation: '' };
+/*
+$('a').click(function(){
+    alert("You are about to go to "+$(this).attr('href'));
+});
+*/
 
 const result = {};
 //---------------------- 1.  IP Address  ----------------------
@@ -195,7 +163,7 @@ for (let i = 0; i < imgTags.length; i++) {
   }
 }
 let totalCount = phishCount + legitCount;
-let outRequest = (phishCount / totalCount) * 100;
+let outRequest = totalCount === 0 ? 0 : (phishCount / totalCount) * 100;
 //alert(outRequest);
 
 if (outRequest < 22) {
@@ -224,7 +192,7 @@ for (let i = 0; i < aTags.length; i++) {
   }
 }
 totalCount = phishCount + legitCount;
-outRequest = (phishCount / totalCount) * 100;
+outRequest = totalCount === 0 ? 0 : (phishCount / totalCount) * 100;
 
 if (outRequest < 31) {
   result['Anchor'] = '-1';
@@ -270,7 +238,7 @@ for (let i = 0; i < lTags.length; i++) {
 }
 
 totalCount = phishCount + legitCount;
-outRequest = (phishCount / totalCount) * 100;
+outRequest = totalCount === 0 ? 0 : (phishCount / totalCount) * 100;
 
 if (outRequest < 17) {
   result['Script & Link'] = '-1';
@@ -308,58 +276,170 @@ for (let i = 0; i < forms.length; i++) {
   }
 }
 
-//---------------------- 23.Using iFrame ----------------------
+//---------------------- 23. Using iFrame (Smart Hidden Detection) ----------------------
 
 const iframes = document.getElementsByTagName('iframe');
 
-if (iframes.length == 0) {
+if (iframes.length === 0) {
   result['iFrames'] = '-1';
 } else {
-  result['iFrames'] = '1';
+  // Chỉ cảnh báo nếu có iFrame thực sự bị ẩn/vô hình (mánh khóe của hacker)
+  // iFrame thông thường như nhúng video, bản đồ, nút Like... thì bỏ qua
+  let hasHiddenIframe = false;
+  for (let i = 0; i < iframes.length; i++) {
+    const fr = iframes[i];
+    const w = parseInt(fr.getAttribute('width') || fr.offsetWidth);
+    const h = parseInt(fr.getAttribute('height') || fr.offsetHeight);
+    const st = fr.style;
+    const isInvisible = (
+      st.display === 'none' ||
+      st.visibility === 'hidden' ||
+      parseFloat(st.opacity) === 0 ||
+      (w <= 1 && h <= 1)
+    );
+    if (isInvisible) {
+      hasHiddenIframe = true;
+      break;
+    }
+  }
+  result['iFrames'] = hasHiddenIframe ? '1' : '-1';
 }
 
-// ─── Phase 1: Gửi ngay kết quả URL-based (< 50ms, không cần chờ DOM scan nặng)
-const mlPort = chrome.runtime.connect({name: ML_PORT_NAME});
-mlPort.postMessage({
-  request: result,
-  urlIntel: urlIntel,
-  websiteIntel: websiteIntel,
-  brandIntel: brandIntel,
-});
+//---------------------- 24. Sensitive Form Analysis + Form Action Hijacking ----------------------
+result['Sensitive Form'] = '-1';
+result['Form Hijacking'] = '-1';
+const sensitiveKeywords = ['otp', 'mật khẩu', 'password', 'passcode', 'ccv', 'số thẻ', 'pin', 'bảo mật', 'đăng nhập'];
+// Các OAuth/API đăng nhập hợp lệ phổ biến — không bị coi là Form Hijacking
+const TRUSTED_FORM_HOSTS = ['google.com', 'accounts.google.com', 'facebook.com', 'apple.com', 'microsoft.com', 'github.com'];
 
-// ─── Phase 2: Chạy DOM scan nặng sau (defer qua setTimeout(0))
-// analyzeWebsite() và BrandDetection có thể tốn 50-200ms trên page lớn như YouTube
-setTimeout(() => {
-  const _currentHostname = (typeof window !== 'undefined') ? window.location.hostname : '';
+let foundSensitive = false;
+let foundHijacking = false;
+const currentHost = window.location.hostname.replace('www.', '');
 
-  const startWeb = Profiler.start('Website Analysis (DOM)');
-  const _websiteIntel = (typeof window !== 'undefined' && window.WebsiteIntelligence &&
-    window.WebsiteIntelligence.analyzeWebsite()) || { score: 0, riskLevel: 'SAFE', explanation: '' };
-  Profiler.end('Website Analysis (DOM)', startWeb);
+for (let i = 0; i < forms.length; i++) {
+  const formHtml = forms[i].innerHTML.toLowerCase();
+  const formAction = forms[i].getAttribute('action') || '';
 
-  const startBrand = Profiler.start('Brand Analysis (DOM)');
-  const _brandIntel = (typeof window !== 'undefined' && window.BrandDetection &&
-    window.BrandDetection.detectBrandImpersonation(_currentHostname)) || { score: 0, riskLevel: 'SAFE', explanation: '' };
-  Profiler.end('Brand Analysis (DOM)', startBrand);
+  // Kiểm tra form có đòi nhập thông tin nhạy cảm
+  let isSensitiveForm = formHtml.includes('type="password"') || formHtml.includes("type='password'");
+  if (!isSensitiveForm) {
+    for (const kw of sensitiveKeywords) {
+      if (formHtml.includes(kw)) {
+        isSensitiveForm = true;
+        break;
+      }
+    }
+  }
 
-  // Luôn gửi update kết quả DOM scan lên background để UI biết là đã phân tích xong
-  mlPort.postMessage({
-    request: result,
-    urlIntel: urlIntel,
-    websiteIntel: _websiteIntel,
-    brandIntel: _brandIntel,
-  });
-}, 0);
+  if (isSensitiveForm) {
+    foundSensitive = true;
+    // Kiểm tra Form Action Hijacking: form nhạy cảm nhưng gửi sang domain khác
+    if (formAction.startsWith('http')) {
+      try {
+        const actionHost = new URL(formAction).hostname.replace('www.', '');
+        const isTrusted = TRUSTED_FORM_HOSTS.some(h => actionHost === h || actionHost.endsWith('.' + h));
+        const isSameDomain = actionHost === currentHost || currentHost.endsWith('.' + actionHost) || actionHost.endsWith('.' + currentHost);
+        if (!isTrusted && !isSameDomain) {
+          foundHijacking = true;
+        }
+      } catch (_) { /* bỏ qua nếu URL action không hợp lệ */ }
+    }
+  }
+}
 
-// ─── Lắng nghe yêu cầu gửi lại dữ liệu từ background (khi Service Worker thức dậy)
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg && msg.type === 'RESEND_INTEL') {
-    const port = chrome.runtime.connect({name: ML_PORT_NAME});
-    port.postMessage({
-      request: result,
-      urlIntel: urlIntel,
-      websiteIntel: typeof window !== 'undefined' && window.WebsiteIntelligence ? window.WebsiteIntelligence.analyzeWebsite() : websiteIntel,
-      brandIntel: typeof window !== 'undefined' && window.BrandDetection ? window.BrandDetection.detectBrandImpersonation(window.location.hostname) : brandIntel,
-    });
+if (foundSensitive) result['Sensitive Form'] = '1';
+if (foundHijacking) result['Form Hijacking'] = '1';
+
+//---------------------- 25. Obfuscated Script (Multi-Layer Risk Scoring) ----------------------
+result['Obfuscated Script'] = '-1';
+let maxRiskScore = 0;
+let maxObfuscationConfidence = 0;
+
+const TRUSTED_PATTERNS = [
+  /webpackBootstrap/, /webpackChunk/, /__vite_/, /vitePreload/,
+  /react\.development/, /react\.production/, /__vue_/, /nuxt\./, /_nuxt/,
+  /next\/dist\//, /cloudflare\.com\/cdn/, /gtag\(/, /ga\(/, /dataLayer\.push/,
+  /serviceWorker\.register/
+];
+
+const calculateEntropy = (str) => {
+  const len = str.length;
+  if (len === 0) return 0;
+  const frequencies = {};
+  for (let i = 0; i < len; i++) {
+    const c = str[i];
+    frequencies[c] = (frequencies[c] || 0) + 1;
+  }
+  let entropy = 0;
+  for (const key in frequencies) {
+    const f = frequencies[key] / len;
+    entropy -= f * Math.log2(f);
+  }
+  return entropy;
+};
+
+for (let i = 0; i < sTags.length; i++) {
+  const scriptContent = sTags[i].innerHTML;
+  if (!scriptContent || scriptContent.length < 50) continue;
+
+  let riskScore = 0;
+  let obfuscationConfidence = 0;
+
+  // Layer 1: Structural Analysis (max +10)
+  let structuralScore = 0;
+  if (scriptContent.length > 500 && (scriptContent.match(/\n/g) || []).length < 5) structuralScore += 3;
+  if (calculateEntropy(scriptContent) > 5.5) structuralScore += 3;
+  if (scriptContent.split('\n').some(line => line.length > 1000)) structuralScore += 2;
+  if (scriptContent.length > 50000) structuralScore += 2; // >50KB inline
+  riskScore += Math.min(10, structuralScore);
+  
+  const hexCount = (scriptContent.match(/\\x[0-9a-fA-F]{2}/g) || []).length;
+  const unicodeCount = (scriptContent.match(/\\u[0-9a-fA-F]{4}/g) || []).length;
+  if (hexCount > 10 || unicodeCount > 10) obfuscationConfidence += 25;
+  if (scriptContent.includes('unescape(') || scriptContent.includes('String.fromCharCode(')) obfuscationConfidence += 25;
+
+  // Layer 2: Suspicious Execution
+  const hasEval = scriptContent.includes('eval(');
+  if (hasEval && obfuscationConfidence > 0) { riskScore += 25; obfuscationConfidence += 25; }
+  if (scriptContent.includes('new Function(')) { riskScore += 20; obfuscationConfidence += 20; }
+  if (scriptContent.includes('document.write(') && scriptContent.includes('<iframe')) riskScore += 25;
+  if (scriptContent.includes('style.display') && scriptContent.includes('none')) riskScore += 20;
+  if (scriptContent.includes('location.href') && obfuscationConfidence > 0) riskScore += 20;
+  if (scriptContent.includes('navigator.clipboard.write')) riskScore += 30;
+  if (scriptContent.includes("addEventListener('keydown'") || scriptContent.includes('addEventListener("keydown"') ||
+      scriptContent.includes("addEventListener('keyup'") || scriptContent.includes('addEventListener("keyup"')) riskScore += 40;
+
+  // Layer 3: Phishing Indicators
+  const lcScript = scriptContent.toLowerCase();
+  if (foundSensitive && obfuscationConfidence > 0) riskScore += 20;
+  if (lcScript.includes('otp')) riskScore += 25;
+  if (['username', 'password', 'login'].some(kw => lcScript.includes(kw))) riskScore += 25;
+  if (['ngân hàng', 'tài khoản', 'chuyển khoản'].some(kw => lcScript.includes(kw))) riskScore += 20;
+  if (['seed phrase', 'private key', 'metamask'].some(kw => lcScript.includes(kw))) riskScore += 20;
+  if (['telegram', 't.me'].some(kw => lcScript.includes(kw))) riskScore += 20;
+
+  // Layer 4: Trusted Patterns
+  for (const pattern of TRUSTED_PATTERNS) {
+    if (pattern.test(scriptContent)) {
+      riskScore = Math.max(0, riskScore - 15);
+      obfuscationConfidence = Math.max(0, obfuscationConfidence - 15);
+    }
+  }
+
+  maxRiskScore = Math.max(maxRiskScore, riskScore);
+  maxObfuscationConfidence = Math.max(maxObfuscationConfidence, obfuscationConfidence);
+}
+
+// Chuyển việc đánh giá cuối cùng sang background.js để kết hợp với Layer 4 (Domain Reputation)
+result['Obfuscation Confidence'] = maxObfuscationConfidence;
+result['Obfuscation Risk'] = maxRiskScore;
+result['Obfuscated Script'] = '-1'; // Sẽ được tính lại trong background.js
+
+//---------------------- Sending the result  ----------------------
+// MV3: Dùng sendMessage thay cho port (port bị ngắt khi SW restart)
+chrome.runtime.sendMessage({ type: 'ANALYSIS_RESULT', result }, () => {
+  if (chrome.runtime.lastError) {
+    // Service worker có thể đang khởi động lại — bỏ qua, popup sẽ polling
+    console.warn('[AntiScam] features.js: could not send result —', chrome.runtime.lastError.message);
   }
 });

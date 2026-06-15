@@ -1,86 +1,55 @@
 <!DOCTYPE html>
-<html lang="vi">
+<html>
 
 <head>
   <meta charset="utf-8">
-  <title>AntiScam Vietnam</title>
+  <title>AntiScam</title>
+  <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.1.3/css/bootstrap.min.css"
+    integrity="sha384-MCw98/SFnGE8fJT3GXwEOngsV7Zt27NXFoaoApmYm81iuXoPkFOJwJ8ERdknLPMO" crossorigin="anonymous">
+  <link href="https://fonts.googleapis.com/css?family=Josefin+Sans|Russo+One" rel="stylesheet">
   <link href="plugin_ui.css" type="text/css" rel="stylesheet">
+  <link href="commons.css" type="text/css" rel="stylesheet">
+  <link href="percentage.css" type="text/css" rel="stylesheet">
 </head>
 
 <body>
   <div id="plugin_main">
-    <div class="glass-header">
-      <div class="header-brand">
-        <img class="logo" src="assets/antiScamLogo.png" alt="AntiScam">
-        <h1 class="app-title">AntiScam Vietnam</h1>
-      </div>
-      <div class="header-url">
-        <h2 id="domain_url" class="domain-text truncate"></h2>
-      </div>
-    </div>
+    <h2 id="domain_url"></h2>
 
-    <!-- MAIN DASHBOARD -->
-    <div id="pluginBody" class="dashboard hidden">
-      
-      <div class="score-card glass-panel" id="score_card">
-        <div class="score-ring">
-          <svg viewBox="0 0 36 36" class="circular-chart">
-            <path class="circle-bg"
-              d="M18 2.0845
-                a 15.9155 15.9155 0 0 1 0 31.831
-                a 15.9155 15.9155 0 0 1 0 -31.831"
-            />
-            <path class="circle" id="score_path"
-              stroke-dasharray="0, 100"
-              d="M18 2.0845
-                a 15.9155 15.9155 0 0 1 0 31.831
-                a 15.9155 15.9155 0 0 1 0 -31.831"
-            />
-          </svg>
-          <div class="score-value">
-            <span id="site_score">--</span>
+    <div id="pluginBody">
+        <div id="percentage_content" class="c100 center">
+          <span id="site_score" class="score">50%</span>
+          <div class="slice">
+            <div class="bar"></div>
+            <div class="fill"></div>
           </div>
         </div>
-        <div class="risk-label" id="risk_label">ĐANG PHÂN TÍCH...</div>
-      </div>
 
-      <div class="ai-insight glass-panel">
-        <h3 class="insight-title">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
-          AI Insight
-        </h3>
-        <p id="site_msg" class="insight-text">Đang phân tích dữ liệu website...</p>
-      </div>
-
-      <div id="details_content" class="details-section">
-        <div class="module-grid" id="engines_grid">
-          <!-- Populated by JS -->
+        <h2 id="site_msg" class="site_message"></h2>
+        <button type="button" class="collapsible">Xem chi tiết</button>
+        <div class="feature-content">
+          <ul id="features"></ul>
         </div>
-      </div>
-    </div>
 
-    <!-- WHITELISTED STATE -->
-    <div id="isSafe" class="state-view hidden">
-      <div class="icon-pulse safe-pulse">
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
-      </div>
-      <h2 class="status-title safe-text">Website An Toàn</h2>
-      <p class="site-url"></p>
-      <p class="status-desc">Trang web này nằm trong danh sách trắng an toàn của AntiScam Vietnam.</p>
     </div>
+    <!-- /.plugin-body -->
 
-    <!-- BLACKLISTED STATE -->
-    <div id="isPhishing" class="state-view hidden">
-      <div class="icon-pulse danger-pulse">
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
-      </div>
-      <h2 class="status-title danger-text">Website Nguy Hiểm</h2>
-      <p class="site-url"></p>
-      <p class="status-desc">Trang web này nằm trong danh sách đen lừa đảo. Vui lòng rời khỏi trang ngay lập tức.</p>
+    <div id="isSafe" class="is-safe">
+        <p class="site-url">www.website.com</p>
+        <img src="assets/shield.png" alt="this website is safe">
+        <h2>Website này an toàn</h2>
     </div>
+    <!-- /.is-safe will be hidden by default -->
+
+    <div id="isPhishing" class="is-safe">
+        <p class="site-url">www.website.com</p>
+        <img src="assets/warning-icon.png" alt="this website is dangerous">
+        <h2>Website nguy hiểm</h2>
+    </div>
+    <!-- /#isPhishing will be hidden by default -->
 
   </div>
-  
+  <!-- <script src="features.js" type="text/javascript"></script> -->
   <script src="js/jquery.js" type="text/javascript"></script>
   <script src="js/plugin_ui.js" type="text/javascript"></script>
 </body>

@@ -338,7 +338,7 @@ app.post(`/${config.get("app.version")}/safecheck`, function(req, res) {
         //         },
         //         data:  {
         //             client: {
-        //               clientId: "chongluadao",
+        //               clientId: "antiscam",
         //               clientVersion: "1.0.0"
         //             },
         //             threatInfo: {

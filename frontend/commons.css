@@ -1,26 +1,41 @@
-:root { 
+:root {
   font-size: 62.5%;
   font-family: 'Russo One', 'Josefin Sans', sans-serif;
 }
+
 body {
   padding: 0px;
   margin: 0px;
-  background: #fff;
+  background: #111827;
+  width: 690px;
+  color: #e2e8f0;
 }
-h1, h2, h3, h4, h5, h6 {
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
   margin-bottom: 0;
 }
+
 .navigation-button-wrapper {
   margin: 0 auto;
   padding-bottom: 2rem;
   display: flex;
   justify-content: center;
 }
+
 .navigation-button {
-  color: white;
+  color: #0b1121;
   font-size: 1.6rem;
   border-radius: 2rem;
-  background-color: #231F20;
+  background-color: #00f3ff;
   width: 15rem;
   padding: 0.5rem 2rem;
+  box-shadow: 0 0 15px rgba(0, 243, 255, 0.4);
+  font-weight: bold;
+  border: none;
+  cursor: pointer;
 }

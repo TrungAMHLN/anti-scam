@@ -1,8 +1,8 @@
 {
   "name": "AntiScam",
-  "version": "1.0.3",
-  "description": "Tiện ích giúp bảo vệ bạn khỏi các trang web có nguy cơ lừa đảo, giả mạo, có nội dung xấu hoặc phần mềm độc hại.",
-  "homepage_url": "https://chongluadao.vn/",
+  "version": "1.6.0",
+  "description": "Bảo vệ bạn khỏi các trang web lừa đảo, mã độc và ăn cắp thông tin.",
+  "homepage_url": "https://antiscam.vn/",
   "permissions": [
     "tabs",
     "storage",
@@ -14,8 +14,7 @@
     "*://*/*"
   ],
   "background": {
-    "service_worker": "js/background.js",
-    "type": "module"
+    "service_worker": "js/background.js"
   },
   "action": {
     "default_popup": "plugin_ui.html"
@@ -23,14 +22,7 @@
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
-      "js": [
-        "js/jquery.js",
-        "js/psl.min.js",
-        "js/engines/url-intelligence.js",
-        "js/engines/brand-detection.js",
-        "js/engines/website-intelligence.js",
-        "js/features.js"
-      ],
+      "js": ["js/jquery.js", "js/features.js"],
       "run_at": "document_idle"
     }
   ],

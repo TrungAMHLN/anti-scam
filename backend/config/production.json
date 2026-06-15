@@ -13,11 +13,11 @@
         "clients": [
             {
                 "app": "chrome-extension",
-                "secret": "chongluadaowithloveforcommunity",
+                "secret": "antiscamwithloveforcommunity",
                 "role": "client"
             }, {
                 "app": "firefox-plguin",
-                "secret": "chongluadaowithloveforcommunity",
+                "secret": "antiscamwithloveforcommunity",
                 "role": "client"
             }
         ]
