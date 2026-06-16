@@ -16,6 +16,9 @@ const multer = require('multer');
 const _ = require('lodash/array');
 const { readFile } = require('fs');
 const { MongoClient } = require('mongodb');
+const dns = require('dns').promises;
+const crypto = require('crypto');
+const querystring = require('querystring');
 
 const fields = ['time','rating', 'url', 'ip', 'client'];
 const opts = { fields, header: false };
@@ -71,6 +74,124 @@ const authenticateJWT = (req, res, next) => {
     } else {
         res.sendStatus(401);
     }
+};
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Threat intelligence helpers (server-side only). API keys are read from config or
+// environment variables, never from the browser extension.
+// ─────────────────────────────────────────────────────────────────────────────
+const getCfg = (pathName, fallback = null) => {
+    try { return config.has(pathName) ? config.get(pathName) : fallback; } catch (_) { return fallback; }
+};
+const normalizeHostname = (value) => {
+    if (!value || typeof value !== 'string') return '';
+    let raw = value.trim();
+    try {
+        if (!/^https?:\/\//i.test(raw)) raw = 'http://' + raw;
+        return new URL(raw).hostname.toLowerCase().replace(/^www\./, '');
+    } catch (_) {
+        return raw.toLowerCase().replace(/^https?:\/\//, '').split('/')[0].replace(/^www\./, '');
+    }
+};
+const normalizeUrlInput = (value) => {
+    if (!value || typeof value !== 'string') return '';
+    const trimmed = value.trim();
+    if (/^https?:\/\//i.test(trimmed)) return trimmed;
+    return 'http://' + trimmed;
+};
+const withTimeout = (promise, ms, fallback) => Promise.race([
+    promise.catch(() => fallback),
+    new Promise(resolve => setTimeout(() => resolve(fallback), ms))
+]);
+const rdapDate = (events, names) => {
+    if (!Array.isArray(events)) return null;
+    const wanted = names.map(x => String(x).toLowerCase());
+    const e = events.find(ev => wanted.includes(String(ev.eventAction || '').toLowerCase()));
+    return e && e.eventDate ? e.eventDate : null;
+};
+const getDomainAgeRdap = async (domain) => {
+    if (!domain) return { ageDays: -1, source: 'rdap', status: 'invalid' };
+    return withTimeout((async () => {
+        const resp = await axios.get(`https://rdap.org/domain/${domain}`, { timeout: 4500 });
+        const registrationDate = rdapDate(resp.data && resp.data.events, ['registration']);
+        const expirationDate = rdapDate(resp.data && resp.data.events, ['expiration', 'expiry']);
+        const ageDays = registrationDate ? Math.floor((Date.now() - new Date(registrationDate).getTime()) / (1000 * 60 * 60 * 24)) : -1;
+        return { ageDays, registrationDate, expirationDate, source: 'rdap' };
+    })(), 5000, { ageDays: -1, source: 'rdap', status: 'timeout' });
+};
+const urlIdForVirusTotal = (url) => Buffer.from(url).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const checkVirusTotal = async (url) => {
+    const key = process.env.VIRUSTOTAL_API_KEY || getCfg('threatIntel.virusTotal.apiKey');
+    if (!key) return null;
+    return withTimeout((async () => {
+        const vtUrl = `https://www.virustotal.com/api/v3/urls/${urlIdForVirusTotal(url)}`;
+        const resp = await axios.get(vtUrl, { headers: { 'x-apikey': key }, timeout: 6500 });
+        const stats = (((resp.data || {}).data || {}).attributes || {}).last_analysis_stats || {};
+        const malicious = (stats.malicious || 0) + (stats.suspicious || 0);
+        return { source: 'VirusTotal', malicious, rawStats: stats, dangerous: malicious > 0 };
+    })(), 7000, null);
+};
+const checkUrlHaus = async (url, domain) => withTimeout((async () => {
+    const headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
+    const urlResp = await axios.post('https://urlhaus-api.abuse.ch/v1/url/', querystring.stringify({ url }), { headers, timeout: 5500 }).catch(() => null);
+    const hostResp = await axios.post('https://urlhaus-api.abuse.ch/v1/host/', querystring.stringify({ host: domain }), { headers, timeout: 5500 }).catch(() => null);
+    const hitUrl = urlResp && urlResp.data && urlResp.data.query_status === 'ok';
+    const hitHost = hostResp && hostResp.data && hostResp.data.query_status === 'ok';
+    return { source: 'URLhaus', dangerous: !!(hitUrl || hitHost), urlStatus: urlResp && urlResp.data && urlResp.data.query_status, hostStatus: hostResp && hostResp.data && hostResp.data.query_status };
+})(), 7000, null);
+const checkThreatFox = async (domain) => withTimeout((async () => {
+    const key = process.env.THREATFOX_API_KEY || getCfg('threatIntel.threatFox.apiKey');
+    const headers = { 'Content-Type': 'application/json' };
+    if (key) headers['Auth-Key'] = key;
+    const resp = await axios.post('https://threatfox-api.abuse.ch/api/v1/', { query: 'search_ioc', search_term: domain }, { headers, timeout: 5500 });
+    return { source: 'ThreatFox', dangerous: resp.data && resp.data.query_status === 'ok', status: resp.data && resp.data.query_status };
+})(), 6500, null);
+const resolveIp = async (domain) => {
+    try { const r = await dns.lookup(domain); return r && r.address; } catch (_) { return null; }
+};
+const checkAbuseIPDB = async (ip) => {
+    const key = process.env.ABUSEIPDB_API_KEY || getCfg('threatIntel.abuseIPDB.apiKey');
+    if (!key || !ip) return null;
+    return withTimeout((async () => {
+        const resp = await axios.get('https://api.abuseipdb.com/api/v2/check', {
+            params: { ipAddress: ip, maxAgeInDays: 90 },
+            headers: { Key: key, Accept: 'application/json' }, timeout: 5500
+        });
+        const score = resp.data && resp.data.data ? resp.data.data.abuseConfidenceScore : 0;
+        return { source: 'AbuseIPDB', ip, abuseConfidenceScore: score || 0, dangerous: (score || 0) >= 50 };
+    })(), 6500, null);
+};
+const checkMalwareReputation = async (url, domain, ip) => {
+    const results = await Promise.all([
+        checkVirusTotal(url), checkUrlHaus(url, domain), checkThreatFox(domain), checkAbuseIPDB(ip)
+    ]);
+    const sources = results.filter(r => r && r.dangerous).map(r => r.source);
+    return { checked: results.filter(Boolean).map(r => r.source), sources, maliciousSources: sources.length, dangerous: sources.length > 0, details: results.filter(Boolean) };
+};
+const getDnsIntel = async (domain, ip) => withTimeout((async () => {
+    const ns = await dns.resolveNs(domain).catch(() => []);
+    const mx = await dns.resolveMx(domain).catch(() => []);
+    let asn = null, asName = null, hosting = null;
+    if (ip) {
+        const bgp = await axios.get(`https://api.bgpview.io/ip/${ip}`, { timeout: 4500 }).catch(() => null);
+        const prefixes = bgp && bgp.data && bgp.data.data && bgp.data.data.prefixes ? bgp.data.data.prefixes : [];
+        const first = prefixes && prefixes[0];
+        if (first && first.asn) { asn = first.asn.asn; asName = first.asn.name; hosting = first.name || first.description; }
+    }
+    const riskyAsn = getCfg('threatIntel.riskyAsn', []);
+    const riskyNs = getCfg('threatIntel.riskyNameserverKeywords', ['bulletproof', 'fastflux', 'privacy', 'dynamic-dns']);
+    const nsText = (ns || []).join(' ').toLowerCase();
+    const riskyInfrastructure = (asn && riskyAsn.includes(asn)) || riskyNs.some(k => nsText.includes(String(k).toLowerCase()));
+    return { ip, asn, asName, hosting, nameservers: ns, mxRecords: mx, riskyInfrastructure: !!riskyInfrastructure };
+})(), 6500, { ip, asn: null, nameservers: [], mxRecords: [], riskyInfrastructure: false });
+const getCommunityReportSummary = async (domain) => {
+    try {
+        if (!db) return { reportCount: 0 };
+        const count = await db.collection('community_reports').countDocuments({ domain });
+        const latest = await db.collection('community_reports').find({ domain }).sort({ time: -1 }).limit(3).toArray();
+        return { reportCount: count, latest: latest.map(x => ({ reason: x.reason, time: x.time })) };
+    } catch (_) { return { reportCount: 0 }; }
 };
 
 app.post(`/${config.get("app.version")}/initSession`, (req, res) => {
@@ -201,6 +322,53 @@ app.post(`/${config.get("app.version")}/rate`, authenticateJWT, function(req, re
         });
     }
 })
+
+
+app.get(`/${config.get("app.version")}/intel`, async function(req, res) {
+    try {
+        const rawUrl = req.query.url || req.query.domain;
+        if (!rawUrl || String(rawUrl).length > maxLengthUrl) return res.sendStatus(status.BAD_REQUEST);
+        const url = normalizeUrlInput(String(rawUrl));
+        const domain = normalizeHostname(String(rawUrl));
+        if (!domain) return res.sendStatus(status.BAD_REQUEST);
+        const ip = await resolveIp(domain);
+        const [domainAge, malware, dnsIntel, community] = await Promise.all([
+            getDomainAgeRdap(domain),
+            checkMalwareReputation(url, domain, ip),
+            getDnsIntel(domain, ip),
+            getCommunityReportSummary(domain)
+        ]);
+        res.status(status.OK).send({
+            status: status.OK,
+            version: config.get("app.version"),
+            requestedOn: new Date(),
+            domain,
+            domainAge,
+            malware,
+            dns: dnsIntel,
+            community
+        });
+    } catch (err) {
+        console.log('intel error', err && err.message);
+        res.status(status.OK).send({ status: status.OK, version: config.get("app.version"), requestedOn: new Date(), malware: { dangerous: false, sources: [] }, community: { reportCount: 0 } });
+    }
+});
+
+app.post(`/${config.get("app.version")}/community-report`, apiLimiter, async function(req, res) {
+    try {
+        const rawUrl = req.body.url || req.body.domain;
+        const domain = normalizeHostname(rawUrl);
+        const reason = String(req.body.reason || '').trim().slice(0, 300);
+        if (!domain || !reason) return res.status(status.BAD_REQUEST).send({ message: 'domain and reason are required' });
+        const params = { domain, reason, url: String(req.body.url || '').slice(0, maxLengthUrl), time: new Date(), ip: req.ip, client: req.headers['user-agent'] || '' };
+        if (db) await db.collection('community_reports').insertOne(params);
+        const community = await getCommunityReportSummary(domain);
+        res.status(status.OK).send({ status: status.OK, version: config.get("app.version"), requestedOn: new Date(), message: 'ok', domain, community });
+    } catch (err) {
+        console.log('community-report error', err && err.message);
+        res.status(status.INTERNAL_SERVER_ERROR).send({ message: 'could not store report' });
+    }
+});
 
 /**
  * The route to get blacklist or whitelist sites from DB

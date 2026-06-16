@@ -4,18 +4,19 @@
         "domain": "localhost",
         "version": "v1",
         "storage": "../data/rating.csv",
-        "static":"public/"
+        "static": "public/"
     },
     "auth": {
         "accessTokenSecret": "somerandomaccesstoken",
-        "refreshTokenSecret":"somerandomstringforrefreshtoken",
+        "refreshTokenSecret": "somerandomstringforrefreshtoken",
         "expiration": "20m",
         "clients": [
             {
                 "app": "chrome-extension",
                 "secret": "antiscamwithloveforcommunity",
                 "role": "client"
-            }, {
+            },
+            {
                 "app": "firefox-plguin",
                 "secret": "antiscamwithloveforcommunity",
                 "role": "client"
@@ -33,5 +34,22 @@
         "safecheckUrl": "https://safebrowsing.googleapis.com/v4/threatMatches:find",
         "key": "AIzaSyDAR0q2v-fbXAV337qrH05byIHCl8bxMfA"
     },
-    "maxLengthUrl": 1000
+    "maxLengthUrl": 1000,
+    "threatIntel": {
+        "virusTotal": {
+            "apiKey": ""
+        },
+        "threatFox": {
+            "apiKey": ""
+        },
+        "abuseIPDB": {
+            "apiKey": ""
+        },
+        "riskyAsn": [],
+        "riskyNameserverKeywords": [
+            "bulletproof",
+            "fastflux",
+            "dynamic-dns"
+        ]
+    }
 }

@@ -8,7 +8,8 @@
     "storage",
     "webRequest",
     "notifications",
-    "declarativeNetRequest"
+    "declarativeNetRequest",
+    "downloads"
   ],
   "host_permissions": [
     "*://*/*"
@@ -21,15 +22,26 @@
   },
   "content_scripts": [
     {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["js/jquery.js", "js/features.js"],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "js/jquery.js",
+        "js/features.js"
+      ],
       "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["js/blocking.js", "blocking.html"],
-      "matches": ["<all_urls>"]
+      "resources": [
+        "js/blocking.js",
+        "blocking.html"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ],
   "incognito": "split",

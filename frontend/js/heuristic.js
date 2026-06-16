@@ -26,7 +26,8 @@ const BRANDS = [
   { name: 'Microsoft',    keys: ['microsoft', 'microsft'],official: ['microsoft.com', 'live.com', 'outlook.com', 'office.com', 'office365.com', 'microsoftonline.com', 'msn.com', 'bing.com', 'azure.com', 'windows.com', 'xbox.com', 'skype.com', 'live.cn'] },
   { name: 'Facebook',     keys: ['facebook', 'facebok'],  official: ['facebook.com', 'fb.com', 'fb.me', 'instagram.com', 'whatsapp.com', 'meta.com', 'messenger.com', 'oculus.com'] },
   { name: 'Apple',        keys: ['apple'],                official: ['apple.com', 'icloud.com', 'me.com', 'mac.com', 'itunes.com', 'appstore.com'] },
-  { name: 'OpenAI',       keys: ['openai'],               official: ['openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com'] },
+  { name: 'OpenAI',       keys: ['openai'],               official: ['openai.com', 'oaistatic.com', 'oaiusercontent.com'] },
+  { name: 'ChatGPT',      keys: ['chatgpt'],              official: ['chatgpt.com', 'openai.com'] },
   { name: 'Telegram',     keys: ['telegram'],             official: ['telegram.org', 't.me', 'telegram.me'] },
   { name: 'Zalo',         keys: ['zalo'],                 official: ['zalo.me', 'zaloapp.com', 'zadn.vn'] },
   { name: 'Vietcombank',  keys: ['vietcombank', 'vcb'],   official: ['vietcombank.com.vn', 'vcb.com.vn', 'vcbdirect.com'] },
@@ -189,8 +190,96 @@ const levenshtein = (a, b) => {
   return prev[bl];
 };
 
+const jaroWinkler = (a, b) => {
+  a = (a || '').toLowerCase(); b = (b || '').toLowerCase();
+  if (a === b) return 1;
+  const al = a.length, bl = b.length;
+  if (!al || !bl) return 0;
+  const matchDistance = Math.floor(Math.max(al, bl) / 2) - 1;
+  const aMatches = new Array(al).fill(false);
+  const bMatches = new Array(bl).fill(false);
+  let matches = 0;
+  for (let i = 0; i < al; i++) {
+    const start = Math.max(0, i - matchDistance);
+    const end = Math.min(i + matchDistance + 1, bl);
+    for (let j = start; j < end; j++) {
+      if (bMatches[j] || a[i] !== b[j]) continue;
+      aMatches[i] = true; bMatches[j] = true; matches++; break;
+    }
+  }
+  if (!matches) return 0;
+  let k = 0, transpositions = 0;
+  for (let i = 0; i < al; i++) {
+    if (!aMatches[i]) continue;
+    while (!bMatches[k]) k++;
+    if (a[i] !== b[k]) transpositions++;
+    k++;
+  }
+  const jaro = ((matches / al) + (matches / bl) + ((matches - transpositions / 2) / matches)) / 3;
+  let prefix = 0;
+  for (let i = 0; i < Math.min(4, al, bl); i++) { if (a[i] === b[i]) prefix++; else break; }
+  return jaro + prefix * 0.1 * (1 - jaro);
+};
+
+const punycodeDecodeLabel = (input) => {
+  // Minimal RFC3492 decoder for IDN labels. Kept local to avoid adding dependencies.
+  if (!input || !input.startsWith('xn--')) return input;
+  const base = 36, tMin = 1, tMax = 26, skew = 38, damp = 700, initialBias = 72, initialN = 128;
+  const label = input.slice(4);
+  const out = [];
+  let i = 0, n = initialN, bias = initialBias;
+  const adapt = (delta, numPoints, firstTime) => {
+    delta = firstTime ? Math.floor(delta / damp) : (delta >> 1);
+    delta += Math.floor(delta / numPoints);
+    let k = 0;
+    while (delta > Math.floor(((base - tMin) * tMax) / 2)) { delta = Math.floor(delta / (base - tMin)); k += base; }
+    return k + Math.floor(((base - tMin + 1) * delta) / (delta + skew));
+  };
+  const digit = (cp) => {
+    if (cp >= 48 && cp <= 57) return cp - 22;
+    if (cp >= 65 && cp <= 90) return cp - 65;
+    if (cp >= 97 && cp <= 122) return cp - 97;
+    return base;
+  };
+  const dash = label.lastIndexOf('-');
+  if (dash > -1) { for (let j = 0; j < dash; j++) out.push(label.charCodeAt(j)); }
+  let idx = dash > -1 ? dash + 1 : 0;
+  while (idx < label.length) {
+    const oldi = i;
+    let w = 1;
+    for (let k = base; ; k += base) {
+      if (idx >= label.length) return input;
+      const d = digit(label.charCodeAt(idx++));
+      if (d >= base) return input;
+      i += d * w;
+      const t = k <= bias ? tMin : (k >= bias + tMax ? tMax : k - bias);
+      if (d < t) break;
+      w *= (base - t);
+    }
+    const outLen = out.length + 1;
+    bias = adapt(i - oldi, outLen, oldi === 0);
+    n += Math.floor(i / outLen);
+    i %= outLen;
+    out.splice(i, 0, n);
+    i++;
+  }
+  try { return String.fromCodePoint.apply(String, out); } catch (_) { return input; }
+};
+
+const toUnicodeDomain = (host) => (host || '').split('.').map(punycodeDecodeLabel).join('.');
+
+const CONFUSABLES = {
+  // Cyrillic
+  'а':'a','А':'a','В':'b','Е':'e','е':'e','К':'k','М':'m','Н':'h','О':'o','о':'o','Р':'p','р':'p','С':'c','с':'c','Т':'t','Х':'x','х':'x','У':'y','у':'y','І':'i','і':'i','ӏ':'l','Ь':'b','ԁ':'d','ԛ':'q','ԝ':'w',
+  // Greek
+  'Α':'a','Β':'b','Ε':'e','Ζ':'z','Η':'h','Ι':'i','Κ':'k','Μ':'m','Ν':'n','Ο':'o','ο':'o','Ρ':'p','Τ':'t','Υ':'y','Χ':'x','α':'a','β':'b','γ':'y','δ':'d','ε':'e','ι':'i','κ':'k','ν':'v','ρ':'p','τ':'t','χ':'x','ϲ':'c',
+  // Full-width / Latin lookalikes
+  '０':'0','１':'1','３':'3','４':'4','５':'5','６':'6','７':'7','８':'8','＠':'@','Ｉ':'i','ｌ':'l','Ｏ':'o'
+};
+
 const dehomoglyph = (s) => {
-  let r = s.toLowerCase();
+  let r = (s || '').split('').map(ch => CONFUSABLES[ch] || ch).join('').toLowerCase();
+  try { r = r.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); } catch (_) {}
   r = r.replace(/rn/g, 'm');
   r = r.replace(/[0]/g, 'o');
   r = r.replace(/[1|!¡]/g, 'l');
@@ -206,11 +295,23 @@ const dehomoglyph = (s) => {
 };
 
 const hasSuspiciousUnicode = (host) => {
-  for (let i = 0; i < host.length; i++) {
+  for (let i = 0; i < (host || '').length; i++) {
     const c = host.charCodeAt(i);
     if (c > 0x7e || (c < 0x30 && c !== 0x2d && c !== 0x2e)) return true;
   }
   return false;
+};
+
+const normalizeDomainAge = (domainAgeInput) => {
+  if (domainAgeInput == null) return { ageDays: -1 };
+  if (typeof domainAgeInput === 'number') return { ageDays: domainAgeInput };
+  if (typeof domainAgeInput === 'object') {
+    const ageDays = domainAgeInput.ageDays != null ? domainAgeInput.ageDays :
+      (domainAgeInput.days != null ? domainAgeInput.days :
+        (domainAgeInput.domainAgeDays != null ? domainAgeInput.domainAgeDays : -1));
+    return { ...domainAgeInput, ageDays };
+  }
+  return { ageDays: -1 };
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -225,6 +326,8 @@ const RISK_PTS = {
   KEYLOGGER: 22, CLIPBOARD: 18, DOWNLOAD: 18, VN_SCAM_KW: 12, HIDDEN_IFRAME: 12,
   REDIRECT_ABUSE: 20, PUNYCODE: 12, UNICODE_HOST: 12, IP_HOST: 10,
   NO_HTTPS: 5, AT_SYMBOL: 3, LONG_URL: 3, SUSPICIOUS_TLD: 7,
+  NEW_DOMAIN_7: 16, NEW_DOMAIN_30: 10, MALWARE_REPUTATION: 45, DNS_RISK: 16,
+  COMMUNITY_REPORT: 22, JS_RISK: 18, SCAM_CONTENT: 16, HIDDEN_FORM: 14,
 };
 
 const analyzeUrl = (urlString) => {
@@ -237,30 +340,34 @@ const analyzeUrl = (urlString) => {
   try { url = new URL(urlString); } catch (_) { return { findings, matchedBrand: null }; }
 
   const hostname = url.hostname.toLowerCase();
+  const unicodeHostname = toUnicodeDomain(hostname).toLowerCase();
   const registrable = getRegistrableDomain(hostname);
-  const sld = registrable.split('.')[0] || hostname.replace(/^www\./, '').split('.')[0];
-  const hostNoWww = hostname.replace(/^www\./, '');
+  const unicodeRegistrable = toUnicodeDomain(registrable).toLowerCase();
+  const sld = unicodeRegistrable.split('.')[0] || unicodeHostname.replace(/^www\./, '').split('.')[0];
+  const hostNoWww = unicodeHostname.replace(/^www\./, '');
+  const asciiHostNoWww = hostname.replace(/^www\./, '');
   const pathLower = url.pathname.toLowerCase();
   const fullLower = urlString.toLowerCase();
   const add = (key, label, points, group, decays = true) => findings.push({ key, label, points, group, decays });
 
   // Punycode / Unicode
-  if (hostname.includes('xn--')) add('Punycode', 'Tên miền chứa ký tự mã hoá (Punycode)', RISK_PTS.PUNYCODE, 'punycode', false);
-  if (hasSuspiciousUnicode(hostname)) add('UnicodeHost', 'Tên miền có ký tự Unicode bất thường', RISK_PTS.UNICODE_HOST, 'punycode', false);
+  if (hostname.includes('xn--')) add('Punycode', 'Tên miền có dấu hiệu giả mạo ký tự.', RISK_PTS.PUNYCODE, 'punycode', false);
+  if (hasSuspiciousUnicode(unicodeHostname)) add('UnicodeHost', 'Tên miền có dấu hiệu giả mạo ký tự.', RISK_PTS.UNICODE_HOST, 'punycode', false);
 
   // Brand mimic (homograph / typosquat / brand-in-domain)
-  const isOfficial = (b) => b.official.some(od => hostNoWww === od || hostNoWww.endsWith('.' + od));
-  const candidates = new Set([sld, hostNoWww]);
+  const isOfficial = (b) => b.official.some(od => asciiHostNoWww === od || asciiHostNoWww.endsWith('.' + od) || hostNoWww === od || hostNoWww.endsWith('.' + od));
+  const candidates = new Set([sld, hostNoWww, asciiHostNoWww]);
   hostNoWww.split('.').forEach(p => { if (p && p.length >= 3) candidates.add(p); });
+  asciiHostNoWww.split('.').forEach(p => { if (p && p.length >= 3) candidates.add(p); });
   let brandFound = false;
   for (const token of candidates) {
     if (!token || token.length < 3 || brandFound) continue;
     const deh = dehomoglyph(token);
     for (const b of BRANDS) {
       if (isOfficial(b)) continue;
-      if (deh === b.keys[0] && token !== b.keys[0]) {
+      if (b.keys.some(bk => deh === bk) && !b.keys.includes(token)) {
         matchedBrand = b.name;
-        add('Homograph', `Tên miền giả mạo thương hiệu ${b.name} (ký tự nhìn giống)`, RISK_PTS.HOMOGLYPH, 'brand', false);
+        add('Homograph', 'Tên miền có dấu hiệu giả mạo ký tự.', RISK_PTS.HOMOGLYPH, 'brand', false);
         brandFound = true; break;
       }
     }
@@ -270,10 +377,12 @@ const analyzeUrl = (urlString) => {
       for (const bk of b.keys) {
         if (bk.length < 5) continue;
         if (token.length < Math.max(4, bk.length - 2)) continue;
-        const d = levenshtein(token, bk);
-        if (d === 1 || d === 2) {
+        const dehToken = dehomoglyph(token);
+        const d = levenshtein(dehToken, bk);
+        const jw = jaroWinkler(dehToken, bk);
+        if ((d === 1 || d === 2) || (jw >= 0.92 && dehToken !== bk && Math.abs(dehToken.length - bk.length) <= 3)) {
           matchedBrand = matchedBrand || b.name;
-          add('Typosquat', `Tên miền gần giống thương hiệu ${b.name}`, d === 1 ? RISK_PTS.TYPOSQUAT_1 : RISK_PTS.TYPOSQUAT_2, 'brand', false);
+          add('Typosquat', 'Tên miền có dấu hiệu giả mạo thương hiệu.', d === 1 || jw >= 0.96 ? RISK_PTS.TYPOSQUAT_1 : RISK_PTS.TYPOSQUAT_2, 'brand', false);
           brandFound = true; break;
         }
       }
@@ -292,7 +401,7 @@ const analyzeUrl = (urlString) => {
       }
       if (hit) {
         matchedBrand = matchedBrand || b.name;
-        add('BrandInDomain', `Tên miền chứa thương hiệu ${b.name} nhưng không thuộc hệ thống chính thức`, RISK_PTS.BRAND_IN_DOMAIN, 'brand', false);
+        add('BrandInDomain', 'Tên miền có dấu hiệu giả mạo thương hiệu.', RISK_PTS.BRAND_IN_DOMAIN, 'brand', false);
         break;
       }
     }
@@ -355,7 +464,7 @@ const analyzeRedirectChain = (chain) => {
   // origin khác final
   if (distinct.length >= 2 && hosts[0] && hosts[hosts.length - 1] && hosts[0] !== hosts[hosts.length - 1]) points += 5;
   points = Math.min(points, 35);
-  const label = points > 0 ? `Chuỗi chuyển hướng phức tạp (${hops} bước, ${distinct.length} tên miền)` : null;
+  const label = points > 0 ? 'Website chuyển hướng qua nhiều miền khác nhau.' : null;
   return { points, hops, distinctDomains: distinct.length, label };
 };
 
@@ -365,7 +474,8 @@ const analyzeRedirectChain = (chain) => {
 const computeScore = (urlString, context = {}) => {
   const ctx = context || {};
   const dom = ctx.dom || {};
-  const domainAgeDays = ctx.domainAgeDays != null ? ctx.domainAgeDays : -1;
+  const domainAgeInfo = normalizeDomainAge(ctx.domainAge || ctx.domainAgeDetails || ctx.domainAgeDays);
+  const domainAgeDays = domainAgeInfo.ageDays != null ? domainAgeInfo.ageDays : -1;
   const rep = ctx.reputation || { checked: false };
   const redirectChain = ctx.redirectChain || [];
   const stabilityMs = ctx.stabilityMs || 0;
@@ -373,6 +483,25 @@ const computeScore = (urlString, context = {}) => {
   const urlPart = analyzeUrl(urlString);
   const findings = urlPart.findings.slice();
   const matchedBrand = urlPart.matchedBrand || dom.matchedBrand;
+
+  if (domainAgeDays >= 0 && domainAgeDays < 7) {
+    findings.push({ key: 'NewDomain', label: 'Website mới được đăng ký gần đây.', points: RISK_PTS.NEW_DOMAIN_7, group: 'domain', decays: false });
+  } else if (domainAgeDays >= 0 && domainAgeDays < 30) {
+    findings.push({ key: 'NewDomain', label: 'Website mới được đăng ký gần đây.', points: RISK_PTS.NEW_DOMAIN_30, group: 'domain', decays: false });
+  }
+
+  const malwareSources = rep.malware && Array.isArray(rep.malware.sources) ? rep.malware.sources.length :
+    (rep.malware && rep.malware.maliciousSources ? rep.malware.maliciousSources : 0);
+  if (rep.malware && (rep.malware.dangerous || malwareSources > 0)) {
+    findings.push({ key: 'MalwareReputation', label: 'Bị nhiều nguồn cảnh báo nguy hiểm.', points: Math.min(70, RISK_PTS.MALWARE_REPUTATION + Math.max(0, malwareSources - 1) * 8), group: 'reputation', decays: false });
+  }
+  if (rep.dns && rep.dns.riskyInfrastructure) {
+    findings.push({ key: 'DNSRisk', label: 'Hạ tầng DNS/hosting có lịch sử rủi ro.', points: RISK_PTS.DNS_RISK, group: 'dns', decays: false });
+  }
+  const reportCount = rep.communityReports || (rep.community && rep.community.count) || 0;
+  if (reportCount >= 3) {
+    findings.push({ key: 'CommunityReport', label: 'Website đã bị cộng đồng báo cáo nhiều lần.', points: RISK_PTS.COMMUNITY_REPORT + Math.min(12, reportCount), group: 'community', decays: false });
+  }
 
   // ── 7.1 DOM findings ──────────────────────────────────────────────────────
   // BRAND IMPERSONATION qua nhiều bề mặt (title/favicon/logo/h1/h2/meta)
@@ -387,11 +516,14 @@ const computeScore = (urlString, context = {}) => {
       group: 'brand', decays: false });
   }
   if (dom.formHijack) findings.push({ key: 'FormHijack', label: 'Biểu mẫu gửi thông tin sang một tên miền khác lạ', points: RISK_PTS.FORM_HIJACK, group: 'form', decays: false });
-  if (dom.obfuscatedScript) findings.push({ key: 'ObfuscatedScript', label: 'Mã JavaScript bị làm rối bất thường', points: RISK_PTS.OBFUSCATION, group: 'obfuscation', decays: false });
+  if (dom.obfuscatedScript) findings.push({ key: 'ObfuscatedScript', label: 'Trang web chứa mã JavaScript đáng ngờ.', points: RISK_PTS.OBFUSCATION, group: 'obfuscation', decays: false });
+  if (dom.jsRiskScore >= 35 && !dom.obfuscatedScript) findings.push({ key: 'JavaScriptRisk', label: 'Trang web chứa mã JavaScript đáng ngờ.', points: RISK_PTS.JS_RISK, group: 'obfuscation', decays: false });
   if (dom.suspiciousExternalScript) findings.push({ key: 'SuspiciousExternal', label: 'Tải mã từ nguồn không phổ biến / địa chỉ IP', points: RISK_PTS.SUSPICIOUS_EXT_IP, group: 'external', decays: false });
   if (dom.keylogger) findings.push({ key: 'Keylogger', label: 'Có dấu hiệu theo dõi thao tác gõ phím', points: RISK_PTS.KEYLOGGER, group: 'malware', decays: false });
   if (dom.clipboardHijack) findings.push({ key: 'ClipboardHijack', label: 'Có dấu hiệu can thiệp bộ nhớ tạm (clipboard)', points: RISK_PTS.CLIPBOARD, group: 'malware', decays: false });
-  if (dom.downloadFile) findings.push({ key: 'DangerousDownload', label: 'Trang yêu cầu tải ngay phần mềm/file khả nghi', points: RISK_PTS.DOWNLOAD, group: 'download', decays: false });
+  if (dom.downloadFile) findings.push({ key: 'DangerousDownload', label: 'Trang yêu cầu tải file có thể gây hại.', points: RISK_PTS.DOWNLOAD, group: 'download', decays: false });
+  if (dom.hiddenForm && (dom.sensitiveForm || dom.passwordField || dom.otpField)) findings.push({ key: 'HiddenForm', label: 'Trang có biểu mẫu nhạy cảm bị ẩn.', points: RISK_PTS.HIDDEN_FORM, group: 'form', decays: false });
+  if (dom.scamContentRisk >= 2) findings.push({ key: 'ScamContent', label: 'Nội dung có dấu hiệu kêu gọi lừa đảo.', points: Math.min(28, RISK_PTS.SCAM_CONTENT + (dom.scamContentRisk - 2) * 4), group: 'content', decays: true });
   // IFRAME — dùng Iframe Risk Score chi tiết từ features.js
   if (dom.iframeRiskScore > 0) {
     const detail = dom.iframeDetails && dom.iframeDetails[0];
@@ -432,7 +564,8 @@ const computeScore = (urlString, context = {}) => {
 
   // ── 7.2 TÍNH RISK SCORE (base + corroboration) ────────────────────────────
   const groupMax = { 'brand': 45, 'brand-path': 12, 'punycode': 15, 'form': 45, 'malware': 40,
-    'obfuscation': 20, 'external': 16, 'download': 18, 'vn-scam': 18, 'redirect': 25, 'misc': 18 };
+    'obfuscation': 24, 'external': 16, 'download': 22, 'vn-scam': 18, 'redirect': 25, 'misc': 18,
+    'domain': 18, 'reputation': 75, 'dns': 18, 'community': 35, 'content': 28 };
   const byGroup = {};
   for (const f of findings) byGroup[f.group] = (byGroup[f.group] || 0) + f.points;
   let baseRisk = 0;
@@ -444,6 +577,8 @@ const computeScore = (urlString, context = {}) => {
   const hasObf = has('obfuscation') || has('external');
   const hasVnScam = has('vn-scam');
   const hasRedirect = has('redirect');
+  const hasReputationDanger = has('reputation');
+  const hasContentScam = has('content');
 
   const veryNew = domainAgeDays >= 0 && domainAgeDays < 7;
   const young = domainAgeDays >= 0 && domainAgeDays < 30;
@@ -471,6 +606,8 @@ const computeScore = (urlString, context = {}) => {
   if (hasMalware && (dom.passwordField || hasBrand || young)) { bonus += 16; reasons.push('Trang có dấu hiệu mã độc đi kèm các yếu tố đáng ngờ khác.'); }
   if (hasVnScam && (dom.passwordField || dom.otpField)) { bonus += 15; reasons.push('URL chứa từ khoá "xác minh/định danh/OTP" và trang yêu cầu nhập thông tin nhạy cảm.'); }
   if (hasRedirect && hasBrand) { bonus += 15; reasons.push('Chuỗi chuyển hướng phức tạp kết hợp giả mạo thương hiệu.'); }
+  if (hasContentScam && (veryNew || hasBrand || dom.sensitiveForm)) { bonus += 12; reasons.push('Nội dung kêu gọi lợi nhuận/nhận thưởng đi kèm dấu hiệu đáng ngờ khác.'); }
+  if (hasReputationDanger) { bonus += 10; reasons.push('URL hoặc tên miền bị nguồn uy tín cảnh báo nguy hiểm.'); }
 
   let riskScore = Math.min(100, baseRisk + bonus);
 
@@ -496,16 +633,19 @@ const computeScore = (urlString, context = {}) => {
   let trustScore = 0;
   const trustBadges = [];
   if (domainAgeDays >= 0) {
-    if (domainAgeDays > 730) { trustScore += 38; trustBadges.push({ key: 'EstablishedDomain', label: 'Tên miền lâu đời (trên 2 năm)' }); }
-    else if (domainAgeDays > 365) { trustScore += 30; trustBadges.push({ key: 'EstablishedDomain', label: 'Tên miền hoạt động trên 1 năm' }); }
-    else if (domainAgeDays > 90) { trustScore += 18; trustBadges.push({ key: 'EstablishedDomain', label: 'Tên miền đã hoạt động vài tháng' }); }
+    if (domainAgeDays > 730) { trustScore += 38; trustBadges.push({ key: 'EstablishedDomain', label: 'Website đã tồn tại nhiều năm.' }); }
+    else if (domainAgeDays > 365) { trustScore += 30; trustBadges.push({ key: 'EstablishedDomain', label: 'Website đã tồn tại nhiều năm.' }); }
+    else if (domainAgeDays > 90) { trustScore += 18; trustBadges.push({ key: 'EstablishedDomain', label: 'Tên miền đã hoạt động vài tháng.' }); }
     else if (domainAgeDays > 30) { trustScore += 8; }
   }
-  if (rep.inWhitelist) { trustScore += 20; trustBadges.push({ key: 'ReputationVerified', label: 'Nằm trong danh sách tin cậy' }); }
-  if (rep.isOfficialBrand) { trustScore += 15; trustBadges.push({ key: 'OfficialBrand', label: 'Tên miền chính thức của thương hiệu lớn' }); }
-  if (/^https:/.test(urlString || '')) { trustScore += 3; trustBadges.push({ key: 'SSL', label: 'Có chứng chỉ bảo mật HTTPS' }); }
+  if (rep.inWhitelist) { trustScore += 20; trustBadges.push({ key: 'ReputationVerified', label: 'Website nằm trong danh sách tin cậy.' }); }
+  if (rep.isOfficialBrand) { trustScore += 15; trustBadges.push({ key: 'OfficialBrand', label: 'Tên miền chính thức của thương hiệu lớn.' }); }
+  if (/^https:/.test(urlString || '')) { trustScore += 3; trustBadges.push({ key: 'SSL', label: 'Website sử dụng kết nối HTTPS.' }); }
   if (rep.trustedCdnOnly !== false && dom.scanned && !dom.suspiciousExternalScript) {
-    trustBadges.push({ key: 'TrustedResources', label: 'Tài nguyên từ các nguồn phổ biến' });
+    trustBadges.push({ key: 'TrustedResources', label: 'Tài nguyên đến từ nguồn phổ biến.' });
+  }
+  if (dom.scanned && !dom.sensitiveForm && !dom.passwordField && !dom.otpField && !dom.formHijack) {
+    trustBadges.push({ key: 'NoPhishingForm', label: 'Không phát hiện biểu mẫu đánh cắp thông tin.' });
   }
   trustScore = Math.min(trustScore, 45);
 
@@ -559,7 +699,7 @@ const computeScore = (urlString, context = {}) => {
     if (result[f.key] !== undefined) continue;
     let value;
     // Đỏ (DANGEROUS): bằng chứng mạnh
-    if (f.points >= 22 || (f.group === 'brand' && riskScore >= 35) || f.key === 'FormHijack')
+    if (f.points >= 22 || (f.group === 'brand' && riskScore >= 35) || f.key === 'FormHijack' || f.key === 'MalwareReputation')
       value = '1';
     // Cam (SUSPICIOUS): đáng ngờ rõ ràng
     else if (f.points >= 14 || (f.group === 'malware' && riskScore >= 25))
@@ -580,42 +720,37 @@ const computeScore = (urlString, context = {}) => {
     else result['Sensitive Form'] = '0';                                    // vàng — trung tính
   }
 
-  // ── 7.8 SUMMARY (V3 — giải thích dễ hiểu, nhất quán với điểm) ─────────────
-  let summary;
+  // ── 7.8 SUMMARY + EXPLANATIONS (short, user-friendly) ─────────────
+  const explanations = [];
+  const pushReason = (level, text, key) => {
+    if (!text) return;
+    const clean = text.replace(/\s+/g, ' ').trim().replace(/\.+$/, '.');
+    if (explanations.some(e => e.text === clean)) return;
+    explanations.push({ level, text: clean, key });
+  };
+  for (const tb of trustBadges) pushReason('safe', tb.label, tb.key);
   const sortedFindings = findings.slice().sort((a, b) => b.points - a.points);
-  const topFinding = sortedFindings[0];
+  for (const f of sortedFindings) {
+    const level = (f.points >= 22 || f.key === 'MalwareReputation') ? 'danger' : (f.points >= 14 ? 'suspicious' : 'warning');
+    pushReason(level, f.label, f.key);
+    if (explanations.filter(e => e.level !== 'safe').length >= 6) break;
+  }
 
+  let summary;
+  const firstDanger = explanations.find(e => e.level === 'danger' || e.level === 'suspicious');
+  const firstSafe = explanations.find(e => e.level === 'safe');
   if (isUnknown) {
     summary = 'Chưa đủ dữ liệu để đánh giá chính xác độ tin cậy. Hãy thận trọng khi nhập thông tin.';
-  } else if (finalScore >= 80) {
-    const t = [];
-    if (rep.inWhitelist) t.push('nằm trong danh sách tin cậy');
-    if (rep.isOfficialBrand) t.push('là tên miền chính thức của thương hiệu lớn');
-    if (domainAgeDays > 365) t.push('đã hoạt động lâu năm');
-    if (riskScore === 0) t.push('không phát hiện dấu hiệu nguy hiểm');
-    summary = 'Trang này ' + t.join(', ') + '.';
   } else if (riskScore >= 55) {
-    // Nguy hiểm cao — dùng lý do corroboration hoặc finding nổi bật
-    let detail = reasons[0];
-    if (!detail && topFinding) {
-      detail = matchedBrand
-        ? `Phát hiện dấu hiệu giả mạo thương hiệu ${matchedBrand}`
-        : topFinding.label;
-    }
-    summary = '⚠️ Nguy cơ lừa đảo cao. ' + (detail || 'Phát hiện nhiều dấu hiệu đáng ngờ') + '.';
+    summary = 'Nguy cơ lừa đảo hoặc mã độc cao. ' + (firstDanger ? firstDanger.text : 'Phát hiện nhiều dấu hiệu nguy hiểm.');
   } else if (riskScore >= 30) {
-    summary = 'Trang có dấu hiệu đáng ngờ. ' + (reasons[0] || (topFinding ? topFinding.label + '.' : 'Nên kiểm tra kỹ trước khi nhập thông tin.'));
-  } else if (riskScore > 0 && topFinding) {
-    // warning nhẹ: nhắc yếu tố nổi bật nhất + khẳng định nhìn chung an toàn
-    const tf = topFinding;
-    // Nếu có reason từ corroboration, ưu tiên dùng
-    if (reasons.length > 0) {
-      summary = 'Trang nhìn chung an toàn, nhưng ' + reasons[0].toLowerCase() + '.';
-    } else {
-      summary = 'Trang nhìn chung an toàn, nhưng ' + tf.label.toLowerCase() + '.';
-    }
+    summary = 'Website có dấu hiệu đáng ngờ. ' + (firstDanger ? firstDanger.text : 'Nên kiểm tra kỹ trước khi nhập thông tin.');
+  } else if (riskScore > 0 && firstDanger) {
+    summary = 'Website nhìn chung chưa có bằng chứng nguy hiểm mạnh, nhưng cần chú ý. ' + firstDanger.text;
+  } else if (firstSafe) {
+    summary = firstSafe.text;
   } else {
-    summary = 'Trang này không phát hiện dấu hiệu giả mạo thương hiệu, mã độc hay thu thập dữ liệu nhạy cảm.';
+    summary = 'Không phát hiện dấu hiệu giả mạo, mã độc hoặc thu thập dữ liệu nhạy cảm.';
   }
 
   const riskLevel = finalScore <= 20 ? 'critical' : finalScore <= 35 ? 'dangerous' :
@@ -623,7 +758,8 @@ const computeScore = (urlString, context = {}) => {
 
   return {
     finalScore, trustScore, riskScore, confidence, isUnknown, isPhish,
-    summary, result, findings, matchedBrand, riskLevel, redirectHops: rc.hops,
+    summary, result, findings, explanations, domainAge: domainAgeInfo,
+    matchedBrand, riskLevel, redirectHops: rc.hops,
   };
 };
 
@@ -656,6 +792,8 @@ if (typeof self !== 'undefined') {
   self.REPUTATION_WHITELIST = REPUTATION_WHITELIST;
   self.BRANDS = BRANDS;
   self.levenshtein = levenshtein;
+  self.jaroWinkler = jaroWinkler;
+  self.toUnicodeDomain = toUnicodeDomain;
 }
 if (typeof window !== 'undefined') {
   window.computeScore = computeScore;

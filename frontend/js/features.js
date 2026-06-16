@@ -42,6 +42,20 @@ const _hostOf = (raw) => {
 };
 const _hostEndsWith = (a, b) => !(!a || !b) && (a === b || a.endsWith('.' + b) || b.endsWith('.' + a));
 
+const _normalizeText = (str) => {
+  try {
+    return (str || '').toString().normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  } catch (_) { return (str || '').toString().toLowerCase(); }
+};
+const VN_SCAM_CONTENT_PATTERNS = [
+  { re: /loi\s*nhuan\s*\d+\s*%|\d+\s*%\s*(moi\s*ngay|\/\s*ngay|ngay)/, label: 'lợi nhuận cao bất thường' },
+  { re: /dau\s*tu|tien\s*dien\s*tu|crypto|coin|forex|quyen\s*chon\s*nhi\s*phan/, label: 'đầu tư/tiền điện tử rủi ro' },
+  { re: /da\s*cap|he\s*thong\s*tuyen\s*duoi|mo\s*hinh\s*kim\s*tu\s*thap/, label: 'đa cấp' },
+  { re: /vay\s*nong|vay\s*nhanh|giai\s*ngan\s*trong\s*ngay|khong\s*can\s*the\s*chap/, label: 'vay nóng' },
+  { re: /viec\s*nhe\s*luong\s*cao|kiem\s*tien\s*online|khong\s*can\s*von|lam\s*nhiem\s*vu/, label: 'việc nhẹ lương cao/kiếm tiền online' },
+  { re: /nhan\s*thuong|trung\s*thuong|nhan\s*qua|hoa\s*hong\s*khung|nap\s*tien\s*nhan\s*thuong/, label: 'nhận thưởng/hoa hồng bất thường' },
+];
+
 // ═══════════════════════════════════════════════════════════════════════════
 // BRAND SURFACES — phát hiện giả mạo qua nhiều bề mặt
 // ═══════════════════════════════════════════════════════════════════════════
@@ -50,7 +64,7 @@ const BRAND_KEYS = [
   ['tpbank','TPBank'],['agribank','Agribank'],['vietinbank','VietinBank'],['vpbank','VPBank'],
   ['sacombank','Sacombank'],['momo','MoMo'],['zalopay','ZaloPay'],['zalo','Zalo'],
   ['google','Google'],['microsoft','Microsoft'],['facebook','Facebook'],['apple','Apple'],
-  ['paypal','PayPal'],['amazon','Amazon'],['netflix','Netflix'],['openai','OpenAI'],
+  ['paypal','PayPal'],['amazon','Amazon'],['netflix','Netflix'],['openai','OpenAI'],['chatgpt','ChatGPT'],
   ['telegram','Telegram'],['github','GitHub'],['shopee','Shopee'],['lazada','Lazada'],
 ];
 const BRAND_OFFICIAL = {
@@ -60,7 +74,7 @@ const BRAND_OFFICIAL = {
   'momo':['momo.vn'],'zalopay':['zalopay.vn'],'zalo':['zalo.me'],'google':['google.com'],
   'microsoft':['microsoft.com'],'facebook':['facebook.com'],'apple':['apple.com'],
   'paypal':['paypal.com'],'amazon':['amazon.com'],'netflix':['netflix.com'],
-  'openai':['openai.com','chatgpt.com'],'telegram':['telegram.org'],'github':['github.com'],
+  'openai':['openai.com','chatgpt.com'],'chatgpt':['chatgpt.com','openai.com'],'telegram':['telegram.org'],'github':['github.com'],
   'shopee':['shopee.vn'],'lazada':['lazada.vn'],'mb':['mbbank.com.vn'],
 };
 
@@ -182,6 +196,17 @@ const collect = () => {
   }
   dom.contentRich = _stickyState.contentRich;
 
+  // ── Scam content tiếng Việt ──
+  let bodyText = '';
+  try { bodyText = _normalizeText((document.body && document.body.innerText || '').slice(0, 60000)); } catch (_) {}
+  const scamHits = [];
+  for (const p of VN_SCAM_CONTENT_PATTERNS) {
+    if (p.re.test(bodyText)) scamHits.push(p.label);
+  }
+  dom.scamContentHits = scamHits;
+  dom.scamContentRisk = scamHits.length;
+  result['Scam Content'] = scamHits.length >= 2 ? '2' : (scamHits.length === 1 ? '0' : '-1');
+
   // ── BRAND surfaces ──
   const bs = detectBrandSurfaces();
   dom.brandInContent = bs.brandInContent;
@@ -282,13 +307,20 @@ const collect = () => {
 
   // ── FORM nhạy cảm + hijacking ──
   const sensitiveNames = ['password','passcode','passwd','otp','pin','cvv','cvc','cardnumber','card-number',
-    'cccd','cmnd','cmt','ekyc','e-kyc','taikhoan','tai-khoan','account','stk','sotk','secret','token',
-    'private','cvv','ngayhethan','ngay-het-han'];
+    'creditcard','credit-card','debitcard','debit-card','cc-number','so-the','sothe','the-ngan-hang',
+    'cccd','cmnd','cmt','ekyc','e-kyc','taikhoan','tai-khoan','account','username','user-name',
+    'stk','sotk','so-tai-khoan','tai-khoan-ngan-hang','bank-account','ngan-hang','internet-banking',
+    'secret','token','private','ngayhethan','ngay-het-han','expiry','expire'];
   const TRUSTED_FORM_HOSTS = ['google.com','facebook.com','apple.com','microsoft.com','github.com'];
-  let sensitiveFound = false, hijackFound = false, pwField = false, otpField = false;
+  let sensitiveFound = false, hijackFound = false, pwField = false, otpField = false, hiddenFormFound = false, cardField = false, bankAccountField = false;
   let sensitiveFormCount = 0;
   for (const f of forms) {
     const html = (f.innerHTML || '').toLowerCase();
+    const style = (f.getAttribute('style') || '').toLowerCase();
+    const hiddenByCss = f.hidden || style.includes('display:none') || style.includes('display: none') ||
+      style.includes('visibility:hidden') || style.includes('visibility: hidden') || style.includes('opacity:0') ||
+      (f.offsetWidth === 0 && f.offsetHeight === 0 && f.querySelector('input'));
+    const hiddenInputCount = f.querySelectorAll ? f.querySelectorAll('input[type="hidden"]').length : 0;
     let sensitive = /type\s*=\s*["']password["']/.test(html) ||
       /autocomplete\s*=\s*["']current-password["']/.test(html) ||
       /autocomplete\s*=\s*["']cc-[a-z]+["']/.test(html);
@@ -297,7 +329,10 @@ const collect = () => {
       sensitiveFound = true;
       sensitiveFormCount++;
       if (/type\s*=\s*["']password["']/.test(html)) pwField = true;
-      if (html.includes('otp') || html.includes('ma-xac-thuc') || html.includes('maxacthuc')) otpField = true;
+      if (html.includes('otp') || html.includes('ma-xac-thuc') || html.includes('maxacthuc') || html.includes('one-time')) otpField = true;
+      if (/card|credit|debit|cvv|cvc|so-the|sothe|cc-number/.test(html)) cardField = true;
+      if (/stk|sotk|so-tai-khoan|bank-account|ngan-hang|internet-banking/.test(html)) bankAccountField = true;
+      if (hiddenByCss || hiddenInputCount >= 3) hiddenFormFound = true;
       const action = f.getAttribute('action') || '';
       if (action.startsWith('http')) {
         try {
@@ -315,9 +350,13 @@ const collect = () => {
   _stickyState.formHijack = dom.formHijack;
   dom.passwordField = pwField;
   dom.otpField = otpField;
+  dom.cardField = cardField;
+  dom.bankAccountField = bankAccountField;
+  dom.hiddenForm = hiddenFormFound;
   // Phản chiếu vào result để hiển thị badge
-  result['Sensitive Form'] = sensitiveFound ? '0' : '-1';
+  result['Sensitive Form'] = sensitiveFound ? (cardField || bankAccountField ? '2' : '0') : '-1';
   result['Form Hijacking'] = hijackFound ? '1' : '-1';
+  result['Hidden Form'] = hiddenFormFound ? '2' : '-1';
   // SFH: form không có action là RẤT phổ biến ở SPA (React/Vue/Angular submit bằng JS).
   //      CHỈ hiện vàng khi form đó YÊU CẦU THÔNG TIN NHẠY CẢM (password/OTP).
   //      Không có password → bình thường → hiện xanh (-1), không phạt điểm.
@@ -337,18 +376,22 @@ const collect = () => {
   };
   let maxConf = 0;
   let hasKeylogger = false, hasClipboard = false, hasObf = false, hasWS = false;
+  const jsRiskIndicators = new Set();
   for (const s of sTags) {
     const code = s.innerHTML;
     if (!code || code.length < 80) continue;
     let conf = 0;
+    const compactCode = code.replace(/\s+/g, '');
     const hex = (code.match(/\\x[0-9a-fA-F]{2}/g) || []).length;
     const uni = (code.match(/\\u[0-9a-fA-F]{4}/g) || []).length;
-    if (hex > 15 || uni > 15) conf += 30;
-    if (/unescape\s*\(/.test(code) || /String\.fromCharCode/.test(code)) conf += 25;
-    if (/atob\s*\(/.test(code) && code.length > 2000) conf += 15;
-    if (/eval\s*\(/.test(code) && conf > 0) conf += 25;
-    if (/new\s+Function\s*\(/.test(code)) conf += 15;
-    if (code.length > 1500 && (code.match(/\n/g) || []).length < 4 && calcEntropy(code) > 5.2) conf += 20;
+    if (hex > 15 || uni > 15) { conf += 30; jsRiskIndicators.add('encoded'); }
+    if (/unescape\s*\(/.test(code) || /(?:String\.)?fromCharCode\s*\(/.test(code)) { conf += 25; jsRiskIndicators.add('decoder'); }
+    if (/atob\s*\(/.test(code)) { conf += code.length > 2000 ? 15 : 8; jsRiskIndicators.add('atob'); }
+    if (/eval\s*\(/.test(code)) { conf += conf > 0 ? 25 : 10; jsRiskIndicators.add('eval'); }
+    if (/new\s+Function\s*\(/.test(code)) { conf += 15; jsRiskIndicators.add('new Function'); }
+    if (/document\.write\s*\(/.test(code)) { conf += 8; jsRiskIndicators.add('document.write'); }
+    if (/["'][A-Za-z0-9+/]{120,}={0,2}["']/.test(compactCode)) { conf += 18; jsRiskIndicators.add('base64 payload'); }
+    if (code.length > 1500 && (code.match(/\n/g) || []).length < 4 && calcEntropy(code) > 5.2) { conf += 20; jsRiskIndicators.add('high entropy'); }
     if (TRUSTED_PAT.some(re => re.test(code))) conf = Math.max(0, conf - 20);
     maxConf = Math.max(maxConf, conf);
     if (conf >= 60) hasObf = true;
@@ -365,7 +408,10 @@ const collect = () => {
   dom.clipboardHijack = hasClipboard || _stickyState.clipboardHijack;
   _stickyState.clipboardHijack = dom.clipboardHijack;
   dom.websocket = hasWS;
+  dom.jsRiskScore = maxConf;
+  dom.jsRiskIndicators = Array.from(jsRiskIndicators).slice(0, 8);
   result['Obfuscated Script'] = hasObf ? '1' : (maxConf >= 40 ? '0' : '-1');
+  result['JavaScript Risk'] = maxConf >= 60 ? '1' : (maxConf >= 35 ? '2' : '-1');
 
   // ── suspicious external script (IP / domain lạ) ──
   let suspExt = false;
@@ -378,7 +424,7 @@ const collect = () => {
   _stickyState.suspiciousExternalScript = dom.suspiciousExternalScript;
 
   // ── dangerous download ──
-  const DANGEROUS_EXT = ['.exe','.scr','.bat','.cmd','.ps1','.apk','.msi','.dll','.vbs'];
+  const DANGEROUS_EXT = ['.exe','.scr','.bat','.cmd','.ps1','.apk','.msi','.dll','.vbs','.jar'];
   dom.downloadFile = false;
   try {
     if (document.querySelector('a[download]') || document.querySelector('meta[http-equiv="refresh"]')) {
@@ -411,6 +457,9 @@ const collect = () => {
     totalScripts: totalCount,
     externalImages: imgExt,
     totalImages: imgTotal,
+    scamContentHits: scamHits.length,
+    jsRiskScore: maxConf,
+    hiddenForms: hiddenFormFound ? 1 : 0,
   };
 
   return { result, dom };
@@ -533,6 +582,7 @@ const _stickyState = {
   networkUploadToExternal: false,
   sensitiveForm: false,
   formHijack: false,
+  hiddenForm: false,
 };
 
 const snapshotKey = (data) => JSON.stringify(data.dom) + '|' + data.result['Obfuscated Script'] + '|' + data.result['SFH'];

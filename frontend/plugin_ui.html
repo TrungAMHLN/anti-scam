@@ -14,6 +14,7 @@
 
 <body>
   <div id="plugin_main">
+    <button id="themeToggle" type="button" title="Đổi giao diện">Dark</button>
     <h2 id="domain_url"></h2>
 
     <div id="pluginBody">
@@ -29,6 +30,18 @@
         <button type="button" class="collapsible">Xem chi tiết</button>
         <div class="feature-content">
           <ul id="features"></ul>
+        </div>
+
+        <div id="community_report">
+          <button id="reportToggle" type="button">Báo cáo website</button>
+          <div id="reportForm" class="report-panel" hidden>
+            <textarea id="reportReason" maxlength="300" placeholder="Lý do báo cáo (ví dụ: yêu cầu OTP, giả mạo ngân hàng...)"></textarea>
+            <div class="report-actions">
+              <button id="sendReport" type="button">Gửi báo cáo</button>
+              <button id="reportCancel" type="button">Huỷ</button>
+              <span id="reportStatus"></span>
+            </div>
+          </div>
         </div>
 
     </div>

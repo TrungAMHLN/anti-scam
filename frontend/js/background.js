@@ -18,15 +18,16 @@ const logger = {
 // ─────────────────────────────────────────────────────────────────────────────
 const ANALYSIS_STATUS = Object.freeze({ IDLE:'IDLE', ANALYZING:'ANALYZING', SUCCESS:'SUCCESS', FAILED:'FAILED', OFFLINE:'OFFLINE' });
 const BLACKLIST_TTL_MS = 60*60*1000, OPENPHISH_TTL_MS = 15*60*1000, CLASSIFIER_TTL_MS = 5*60*1000;
-const RESULT_CACHE_TTL_MS = 10*60*1000, FETCH_TIMEOUT_MS = 10_000, MAX_RETRIES = 3;
+const RESULT_CACHE_TTL_MS = 10*60*1000, INTEL_CACHE_TTL_MS = 30*60*1000, FETCH_TIMEOUT_MS = 10_000, MAX_RETRIES = 3;
 const API_BASE = 'https://api.chongluadao.vn';
+const BACKEND_BASE = API_BASE;
 const OPENPHISH_URL = 'https://raw.githubusercontent.com/openphish/public_feed/refs/heads/main/feed.txt';
 const PORT_REDIRECT = 'REDIRECT_PORT_NAME', PORT_CLOSE_TAB = 'CLOSE_TAB_PORT_NAME';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Circuit Breaker
 // ─────────────────────────────────────────────────────────────────────────────
-const circuitBreaker = { antiScamApi:{failures:0,openUntil:0}, openPhish:{failures:0,openUntil:0} };
+const circuitBreaker = { antiScamApi:{failures:0,openUntil:0}, openPhish:{failures:0,openUntil:0}, backendIntel:{failures:0,openUntil:0} };
 const CB_THRESHOLD = 3, CB_TIMEOUT_MS = 30_000;
 const checkCB = (s) => { const cb = circuitBreaker[s]; if (Date.now() < cb.openUntil) { logger.warn(`CB OPEN ${s}`); return false; } return true; };
 const recFail = (s) => { const cb = circuitBreaker[s]; cb.failures++; if (cb.failures >= CB_THRESHOLD) { cb.openUntil = Date.now() + CB_TIMEOUT_MS; logger.error(`CB TRIPPED ${s}`); } };
@@ -74,23 +75,60 @@ const setUrlCache = async (url, data) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // RDAP Domain Age
 // ─────────────────────────────────────────────────────────────────────────────
+const _pickRdapDate = (events, names) => {
+  if (!Array.isArray(events)) return null;
+  const wanted = names.map(n => String(n).toLowerCase());
+  const ev = events.find(e => wanted.includes(String(e.eventAction || '').toLowerCase()));
+  return ev && ev.eventDate ? ev.eventDate : null;
+};
+
 const fetchDomainAge = async (domain) => {
   try {
     let base = domain;
     try { if (typeof psl !== 'undefined') base = psl.parse(domain).domain || domain; } catch(e){}
     const key = `age_${base}`;
     const cached = await chrome.storage.session.get(key);
-    if (cached && cached[key] !== undefined) return cached[key];
-    const ctrl = new AbortController(); const t = setTimeout(()=>ctrl.abort(), 3000);
-    const res = await fetch(`https://rdap.org/domain/${base}`, { signal: ctrl.signal }); clearTimeout(t);
-    if (!res.ok) return -1;
-    const data = await res.json();
-    if (data && data.events) {
-      const reg = data.events.find(e => e.eventAction === 'registration');
-      if (reg && reg.eventDate) { const age = (Date.now() - new Date(reg.eventDate).getTime())/(1000*60*60*24); await chrome.storage.session.set({ [key]: age }); return age; }
+    if (cached && cached[key] !== undefined) {
+      const c = cached[key];
+      if (typeof c === 'number') return { ageDays: c, source: 'rdap-cache' };
+      return c;
     }
+    const ctrl = new AbortController(); const t = setTimeout(()=>ctrl.abort(), 3500);
+    const res = await fetch(`https://rdap.org/domain/${base}`, { signal: ctrl.signal }); clearTimeout(t);
+    if (!res.ok) return { ageDays: -1, source: 'rdap', status: 'nodata' };
+    const data = await res.json();
+    const registrationDate = _pickRdapDate(data && data.events, ['registration']);
+    const expirationDate = _pickRdapDate(data && data.events, ['expiration', 'expiry']);
+    const ageDays = registrationDate ? (Date.now() - new Date(registrationDate).getTime())/(1000*60*60*24) : -1;
+    const info = { ageDays, registrationDate, expirationDate, source: 'rdap' };
+    await chrome.storage.session.set({ [key]: info });
+    return info;
   } catch (err) { logger.warn(`fetchDomainAge ${domain}:`, err.message); }
-  return -1;
+  return { ageDays: -1, source: 'rdap', status: 'error' };
+};
+
+const fetchBackendIntel = async (urlString, domain) => {
+  try {
+    let base = domain;
+    try { if (typeof psl !== 'undefined') base = psl.parse(domain).domain || domain; } catch(e){}
+    const key = `intel_${base}`;
+    const cached = await chrome.storage.session.get(key);
+    if (cached && cached[key] && Date.now() - cached[key].timestamp < INTEL_CACHE_TTL_MS) return cached[key].data;
+    const payload = encodeURIComponent(urlString || domain || '');
+    const data = await fetchWithRetry(`${BACKEND_BASE}/v1/intel?url=${payload}`, 'backendIntel', true, 1);
+    if (data && data.status !== 'error') {
+      await chrome.storage.session.set({ [key]: { data, timestamp: Date.now() } });
+      return data;
+    }
+  } catch (err) { logger.warn(`fetchBackendIntel ${domain}:`, err.message); }
+  return null;
+};
+
+const mergeDomainAge = (rdapAge, backendAge) => {
+  if (backendAge && backendAge.ageDays != null && backendAge.ageDays >= 0) return backendAge;
+  if (rdapAge && rdapAge.ageDays != null) return rdapAge;
+  if (typeof rdapAge === 'number') return { ageDays: rdapAge };
+  return { ageDays: -1 };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -168,7 +206,7 @@ const getRedirectChain = (tabId) => redirectChains.get(tabId) || [];
 // ═══════════════════════════════════════════════════════════════════════════
 // REPUTATION ENGINE  (Vấn đề 11)
 // ═══════════════════════════════════════════════════════════════════════════
-const resolveReputation = (domain, registrable, urlString) => {
+const resolveReputation = (domain, registrable, urlString, backendIntel = null) => {
   const inBuiltWhitelist = typeof REPUTATION_WHITELIST !== 'undefined' && REPUTATION_WHITELIST.has(registrable);
   // CLD whitelist (tải từ API)
   let inCldWhitelist = false;
@@ -180,10 +218,18 @@ const resolveReputation = (domain, registrable, urlString) => {
     for (const b of blackListing) { if (urlString.includes(b.replace(/\/$/,''))) { inBlacklist = true; break; } }
   }
   const officialBrand = typeof isOfficialBrandDomain !== 'undefined' ? isOfficialBrandDomain(domain) : null;
+  const intel = backendIntel || {};
+  const malware = intel.malware || {};
+  const dns = intel.dns || {};
+  const communityReports = intel.community && intel.community.reportCount ? intel.community.reportCount : 0;
   return {
     inWhitelist: inBuiltWhitelist || inCldWhitelist,
-    inBlacklist,
+    inBlacklist: inBlacklist || !!malware.dangerous,
     isOfficialBrand: !!officialBrand,
+    malware,
+    dns,
+    community: intel.community || null,
+    communityReports,
     checked: true,
   };
 };
@@ -191,7 +237,7 @@ const resolveReputation = (domain, registrable, urlString) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Utility
 // ─────────────────────────────────────────────────────────────────────────────
-const getDomain = (url) => { const m = url.match(/^https?:\/\/([^/?#]+)(?:[/?#]|$)/i); return (m && m[1]) || ''; };
+const getDomain = (url) => { try { return new URL(url).hostname; } catch (_) { const m = url.match(/^https?:\/\/([^/?#]+)(?:[/?#]|$)/i); return (m && m[1].split(':')[0]) || ''; } };
 const createUrlObject = (url) => { try { return new URL(url); } catch { return null; } };
 const getRegistrable = (domain) => {
   if (typeof self !== 'undefined' && self.getRegistrableDomain) return self.getRegistrableDomain(domain);
@@ -199,7 +245,7 @@ const getRegistrable = (domain) => {
 };
 
 const updateBadge = (isPhishing, finalScore, tabId) => {
-  const title = isPhishing ? `AntiScam: ⚠️ Cảnh báo (${finalScore}% an toàn)` : `AntiScam: ✅ An toàn (${finalScore}%)`;
+  const title = isPhishing ? `AntiScam: ⚠ Cảnh báo (${finalScore}% an toàn)` : `AntiScam: ✓ An toàn (${finalScore}%)`;
   chrome.action.setTitle({ title, tabId }).catch(()=>{});
   chrome.action.setIcon({ path: 'assets/antiScamLogo.png', tabId }).catch(()=>{});
 };
@@ -227,15 +273,18 @@ const classify = async (tabId, featuresResult, urlString, domInput = {}, isUpdat
       if (cached) {
         await setTabState(tabId, { status: ANALYSIS_STATUS.SUCCESS, isPhish: cached.isPhish,
           legitimatePercent: cached.legitimatePercent, confidence: cached.confidence,
-          result: cached.result || {}, summary: cached.summary || '', isUnknown: cached.isUnknown, url: urlString });
+          result: cached.result || {}, summary: cached.summary || '', explanations: cached.explanations || [], isUnknown: cached.isUnknown, url: urlString });
         updateBadge(cached.isPhish, cached.legitimatePercent, tabId); return;
       }
     }
 
     // 3. Domain age + reputation + redirect chain
     const prev = await getTabState(tabId);
-    const domainAgeDays = await fetchDomainAge(domain);
-    const reputation = resolveReputation(domain, registrable, urlString);
+    const rdapAge = await fetchDomainAge(domain);
+    const backendIntel = await fetchBackendIntel(urlString, domain);
+    const domainAge = mergeDomainAge(rdapAge, backendIntel && backendIntel.domainAge);
+    const domainAgeDays = domainAge.ageDays != null ? domainAge.ageDays : -1;
+    const reputation = resolveReputation(domain, registrable, urlString, backendIntel);
     const redirectChain = getRedirectChain(tabId);
 
     // 4. stabilityMs + risk-decay tracking (Vấn đề 9, 13)
@@ -247,6 +296,7 @@ const classify = async (tabId, featuresResult, urlString, domInput = {}, isUpdat
     const assessment = computeScore(urlString, {
       dom: domInput || {},
       domainAgeDays,
+      domainAge,
       reputation,
       redirectChain,
       stabilityMs,
@@ -291,6 +341,9 @@ const classify = async (tabId, featuresResult, urlString, domInput = {}, isUpdat
       isUnknown: assessment.isUnknown,
       result: mergedResult,
       summary: assessment.summary,
+      explanations: assessment.explanations || [],
+      domainAge: assessment.domainAge || domainAge,
+      reputation,
       redirectHops: assessment.redirectHops,
       counts: (domInput && domInput.counts) ? domInput.counts : null,
       analysisStart,
@@ -299,7 +352,7 @@ const classify = async (tabId, featuresResult, urlString, domInput = {}, isUpdat
 
     // 10. Cache (chỉ lần đầu)
     if (!isUpdate) {
-      await setUrlCache(urlString, { isPhish, legitimatePercent: finalScore, confidence, result: mergedResult, summary: assessment.summary, isUnknown: assessment.isUnknown });
+      await setUrlCache(urlString, { isPhish, legitimatePercent: finalScore, confidence, result: mergedResult, summary: assessment.summary, explanations: assessment.explanations || [], isUnknown: assessment.isUnknown });
     }
 
     updateBadge(isPhish, finalScore, tabId);
@@ -370,6 +423,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     setTabState(tabId, { status: ANALYSIS_STATUS.IDLE, isWhiteList:null, isBlocked:null, url:null })
       .then(()=>sendResponse({ok:true})).catch(()=>sendResponse({ok:false})); return true;
   }
+  if (request.type === 'COMMUNITY_REPORT') {
+    const payload = request.payload || {};
+    fetch(`${BACKEND_BASE}/v1/community-report`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: payload.url, domain: payload.domain, reason: payload.reason })
+    }).then(r => r.json()).then(data => sendResponse({ ok:true, data })).catch(err => {
+      logger.warn('COMMUNITY_REPORT', err.message); sendResponse({ ok:false });
+    });
+    return true;
+  }
   if (request.type === 'SET_ICON') {
     chrome.action.setIcon({ path: request.path, tabId: request.tabId }).catch(()=>{});
     sendResponse({ ok:true }); return true;
@@ -412,6 +475,58 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 chrome.webRequest.onBeforeRequest.addListener(safeCheck, { urls: ['*://*/*'], types: ['main_frame'] });
+
+
+// Download risk guard — pause dangerous files from suspicious pages and ask user.
+const DANGEROUS_DOWNLOAD_EXTS = ['.exe', '.scr', '.bat', '.cmd', '.apk', '.jar', '.ps1'];
+const pendingDownloads = new Map();
+const _downloadExt = (u, filename='') => {
+  const raw = (filename || u || '').split('?')[0].split('#')[0].toLowerCase();
+  return DANGEROUS_DOWNLOAD_EXTS.find(ext => raw.endsWith(ext)) || null;
+};
+const _isDownloadFromRiskyContext = async (item) => {
+  try {
+    const tabs = await chrome.tabs.query({ currentWindow:true, active:true });
+    const tab = tabs && tabs[0];
+    const state = tab ? await getTabState(tab.id) : null;
+    const itemHost = createUrlObject(item.finalUrl || item.url || '')?.hostname || '';
+    const tabHost = createUrlObject((state && state.url) || (tab && tab.url) || '')?.hostname || '';
+    const sameContext = item.referrer ? ((createUrlObject(item.referrer)?.hostname || '') === tabHost) : (itemHost === tabHost || !itemHost || !tabHost);
+    if (state && sameContext && (state.isPhish || state.riskScore >= 30 || state.legitimatePercent <= 55)) return true;
+    const local = typeof analyzeUrl !== 'undefined' ? analyzeUrl(item.finalUrl || item.url || '') : { findings: [] };
+    return !!(local.findings || []).find(f => ['DangerousDownload','Typosquat','Homograph','BrandInDomain'].includes(f.key));
+  } catch (_) { return false; }
+};
+if (chrome.downloads && chrome.downloads.onCreated) {
+  chrome.downloads.onCreated.addListener(async (item) => {
+    const ext = _downloadExt(item.finalUrl || item.url, item.filename);
+    if (!ext) return;
+    const risky = await _isDownloadFromRiskyContext(item);
+    if (!risky) return;
+    try { chrome.downloads.pause(item.id); } catch (_) {}
+    const nid = `download-risk-${item.id}`;
+    pendingDownloads.set(nid, item.id);
+    chrome.notifications.create(nid, {
+      type:'basic', iconUrl: chrome.runtime.getURL('assets/antiScamLogo.png'),
+      title:'Cảnh báo tải xuống',
+      message:`File ${ext.toUpperCase()} từ website đáng ngờ có thể gây hại. Bạn có muốn tiếp tục tải không?`,
+      buttons:[{ title:'Tiếp tục tải' }, { title:'Hủy tải' }], requireInteraction:true
+    }).catch(()=>{});
+  });
+  chrome.notifications.onButtonClicked.addListener((notificationId, buttonIndex) => {
+    if (!pendingDownloads.has(notificationId)) return;
+    const id = pendingDownloads.get(notificationId); pendingDownloads.delete(notificationId);
+    if (buttonIndex === 0) chrome.downloads.resume(id).catch(()=>{});
+    else chrome.downloads.cancel(id).catch(()=>{});
+    chrome.notifications.clear(notificationId).catch(()=>{});
+  });
+  chrome.notifications.onClosed.addListener((notificationId) => {
+    if (pendingDownloads.has(notificationId)) {
+      const id = pendingDownloads.get(notificationId); pendingDownloads.delete(notificationId);
+      chrome.downloads.cancel(id).catch(()=>{});
+    }
+  });
+}
 
 chrome.runtime.onStartup.addListener(() => startup().catch(()=>{}));
 chrome.runtime.onInstalled.addListener(() => {
