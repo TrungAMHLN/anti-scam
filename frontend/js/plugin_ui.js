@@ -10,20 +10,26 @@ const colors = { '-1':'#22c55e', '0':'#facc15', '2':'#fb923c', '1':'#dc2626' };
 const reasonColors = { safe:'#22c55e', warning:'#facc15', suspicious:'#fb923c', danger:'#dc2626' };
 let currentTabUrl = '';
 let currentDomain = '';
+let latestManualScanState = null;
 
-const initTheme = () => {
-  const saved = localStorage.getItem('antiscam-theme') || 'auto';
-  if (saved === 'light') document.documentElement.setAttribute('data-theme', 'light');
-  if (saved === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
+const _applyThemeLabel = () => {
   const btn = document.getElementById('themeToggle');
-  if (btn) btn.textContent = (saved === 'light') ? 'Light' : 'Dark';
+  const current = document.documentElement.getAttribute('data-theme') || 'dark';
+  if (btn) btn.textContent = current === 'light' ? 'Light' : 'Dark';
+};
+const initTheme = () => {
+  const saved = localStorage.getItem('antiscam-theme');
+  const prefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+  const theme = saved || (prefersLight ? 'light' : 'dark');
+  document.documentElement.setAttribute('data-theme', theme);
+  _applyThemeLabel();
 };
 const toggleTheme = () => {
   const cur = document.documentElement.getAttribute('data-theme') || 'dark';
   const next = cur === 'dark' ? 'light' : 'dark';
   document.documentElement.setAttribute('data-theme', next);
   localStorage.setItem('antiscam-theme', next);
-  const btn = document.getElementById('themeToggle'); if (btn) btn.textContent = next === 'light' ? 'Light' : 'Dark';
+  _applyThemeLabel();
 };
 initTheme();
 const themeBtn = document.getElementById('themeToggle');
@@ -149,23 +155,35 @@ const _normLabel = (text) => _stripSentence(text).toLowerCase()
 
 const semanticKeyMap = {
   'HTTPS':'https', 'SSL':'https', 'NoHTTPS':'https',
+  'HTTPS in URL\'s domain part':'https-in-domain-text',
+  '@ Symbol':'url-at-symbol', 'AtSymbol':'url-at-symbol', 'Redirecting using //':'url-at-symbol',
+  'IP Address':'ip-host', 'IPHost':'ip-host',
+  'URL Length':'url-length', 'LongURL':'url-length',
   'OfficialBrand':'official-domain',
   'EstablishedDomain':'domain-age-established', 'Domain Age':'domain-age-new', 'NewDomain':'domain-age-new',
-  'TrustedResources':'trusted-resources',
-  'NoPhishingForm':'no-phishing-form', 'Sensitive Form':'no-phishing-form',
-  'Form Hijacking':'form-destination', 'FormDest':'form-destination', 'SFH':'form-unknown-action',
+  'TrustedResources':'script-resource', 'Script & Link':'script-resource', 'SuspiciousExternal':'script-resource',
+  'Request URL':'image-resource',
+  'NoPhishingForm':'phishing-form', 'Sensitive Form':'phishing-form',
+  'Form Hijacking':'form-destination', 'FormDest':'form-destination', 'SFH':'form-unknown-action', 'mailto':'form-email-submit',
   'Punycode':'unicode-spoof', 'UnicodeHost':'unicode-spoof', 'Homograph':'unicode-spoof',
   'Typosquat':'brand-spoof', 'BrandInDomain':'brand-spoof', 'BrandImpersonation':'brand-spoof',
   'Obfuscated Script':'js-risk', 'JavaScript Risk':'js-risk', 'JavaScriptRisk':'js-risk',
-  'Scam Content':'scam-content', 'ScamContent':'scam-content',
+  'Scam Content':'scam-indicator', 'ScamContent':'scam-indicator', 'VNScamKeyword':'scam-indicator',
   'MalwareReputation':'malware-reputation', 'DNSRisk':'dns-risk', 'CommunityReport':'community-report',
-  'DangerousDownload':'download-risk'
+  'DangerousDownload':'download-risk', 'FileHash':'file-hash', 'FileReputation':'file-reputation', 'DangerousFileType':'dangerous-file-type', 'ArchiveContainer':'archive-container', 'EmailFormat':'email-format', 'EmailMX':'email-mx', 'EmailSPF':'email-spf', 'EmailDMARC':'email-dmarc', 'EmailDKIM':'email-dkim', 'TempEmail':'temp-email', 'EmailDomainNew':'email-domain-age', 'EmailRep':'email-rep', 'EmailBlacklisted':'email-rep', 'PhoneFormat':'phone-format', 'PhoneVN':'phone-format', 'PhoneInternational':'phone-format', 'HashFormat':'hash-format', 'ImageInput':'image-input', 'IPFormat':'ip-host', 'PublicIP':'ip-host', 'PrivateIP':'ip-host'
 };
 
 const _canonicalKey = (key, text) => semanticKeyMap[key] || _normLabel(featureTranslations[key] || text || key);
 const _levelFromValue = (val) => val === '-1' ? 'safe' : (val === '1' ? 'danger' : (val === '2' ? 'suspicious' : 'warning'));
 const _groupFromLevel = (level) => level === 'safe' ? 'positive' : (level === 'danger' ? 'danger' : 'warning');
 const _prefixForLevel = (level) => level === 'safe' ? '✓' : (level === 'danger' ? '✕' : '⚠');
+const HIDE_SAFE_SIGNAL_KEYS = new Set([
+  // These are absence-of-risk checks. Showing them as green chips creates contradictions
+  // such as "HTTPS hợp lệ" + "HTTPS giả mạo" or "Form gửi sang domain lạ" in green.
+  "HTTPS in URL's domain part",
+  'Form Hijacking',
+  'FormDest',
+]);
 
 const _labelForSignal = (key, val, fallbackText) => {
   const levelWords = ['safe', 'warning', 'suspicious', 'danger'];
@@ -177,26 +195,67 @@ const _labelForSignal = (key, val, fallbackText) => {
     case 'OfficialBrand': return 'Domain chính thức';
     case 'EstablishedDomain': return 'Domain lâu năm';
     case 'NewDomain': case 'Domain Age': return 'Website mới đăng ký';
-    case 'TrustedResources': return 'CDN uy tín';
+    case 'TrustedResources': case 'Script & Link': return safe ? 'CDN/tài nguyên hợp lệ' : 'Mã nhúng từ nguồn lạ';
     case 'Favicon': return safe ? 'Favicon hợp lệ' : 'Favicon bất thường';
     case 'Anchor': return safe ? 'Liên kết ngoài hợp lệ' : 'Liên kết ngoài đáng chú ý';
-    case 'Request URL': return safe ? 'Tài nguyên ảnh hợp lệ' : 'Tài nguyên ảnh từ nguồn lạ';
-    case 'Script & Link': return safe ? 'Mã nhúng hợp lệ' : 'Mã nhúng từ nguồn lạ';
+    case 'Request URL': return safe ? 'Ảnh/tài nguyên hợp lệ' : 'Ảnh/tài nguyên từ nguồn lạ';
     case 'Sensitive Form': return safe ? 'Không phát hiện form đánh cắp' : 'Yêu cầu thông tin nhạy cảm';
     case 'NoPhishingForm': return 'Không phát hiện form đánh cắp';
-    case 'Form Hijacking': case 'FormDest': return 'Form gửi sang domain lạ';
+    case 'Form Hijacking': case 'FormDest': return safe ? 'Không phát hiện form gửi sang domain lạ' : 'Form gửi sang domain lạ';
     case 'SFH': return 'Form chưa rõ nơi nhận';
-    case 'Punycode': case 'UnicodeHost': case 'Homograph': return 'Dấu hiệu giả mạo ký tự';
-    case 'Typosquat': case 'BrandInDomain': case 'BrandImpersonation': return 'Dấu hiệu giả mạo thương hiệu';
-    case 'JavaScript Risk': case 'JavaScriptRisk': case 'Obfuscated Script': return 'JavaScript đáng ngờ';
-    case 'Scam Content': case 'ScamContent': return 'Nội dung lừa đảo';
-    case 'MalwareReputation': return 'Nguồn cảnh báo nguy hiểm';
-    case 'DNSRisk': return 'Hạ tầng DNS rủi ro';
-    case 'CommunityReport': return 'Cộng đồng đã báo cáo';
-    case 'DangerousDownload': return 'Tải xuống nguy hiểm';
+    case 'Punycode': case 'UnicodeHost': case 'Homograph': return safe ? 'Không phát hiện giả mạo ký tự' : 'Dấu hiệu giả mạo ký tự';
+    case 'Typosquat': case 'BrandInDomain': case 'BrandImpersonation': return safe ? 'Không phát hiện giả mạo thương hiệu' : 'Dấu hiệu giả mạo thương hiệu';
+    case 'JavaScript Risk': case 'JavaScriptRisk': case 'Obfuscated Script': return safe ? 'Không phát hiện JavaScript đáng ngờ' : 'JavaScript đáng ngờ';
+    case 'Scam Content': case 'ScamContent': case 'VNScamKeyword': return safe ? 'Không phát hiện từ khóa lừa đảo' : 'Từ khóa lừa đảo';
+    case 'MalwareReputation': return safe ? 'Không nằm trong nguồn cảnh báo nguy hiểm' : 'Nguồn cảnh báo nguy hiểm';
+    case 'DNSRisk': return safe ? 'Không phát hiện hạ tầng DNS rủi ro' : 'Hạ tầng DNS rủi ro';
+    case 'DNSIntel': return 'Đã xác định ASN/hosting';
+    case 'URLReputation': return 'Không thấy trong nguồn cảnh báo đã kiểm tra';
+    case 'SSLNew': return 'SSL mới được cấp gần đây';
+    case 'CommunityReport': return safe ? 'Chưa có báo cáo cộng đồng đáng kể' : 'Cộng đồng đã báo cáo';
+    case 'DangerousDownload': return safe ? 'Không phát hiện tải xuống nguy hiểm' : 'Tải xuống nguy hiểm';
+    case 'FileHash': return 'Đã tạo hash file';
+    case 'FileReputation': return safe ? 'Hash chưa bị cảnh báo' : 'Hash cần kiểm tra uy tín';
+    case 'DangerousFileType': return 'File có thể thực thi mã';
+    case 'ArchiveContainer': return 'File nén chứa nhiều file';
+    case 'EmailFormat': return 'Email đúng định dạng';
+    case 'EmailMX': return safe ? 'Có MX Record hợp lệ' : 'Không có MX Record hợp lệ';
+    case 'EmailSPF': return safe ? 'Có SPF' : 'Chưa cấu hình SPF';
+    case 'EmailDMARC': return safe ? 'Có DMARC' : 'Chưa cấu hình DMARC';
+    case 'EmailDKIM': return 'Có DKIM selector phổ biến';
+    case 'TempEmail': return 'Email tạm thời';
+    case 'EmailDomainNew': return 'Domain email mới đăng ký';
+    case 'EmailRep': return safe ? 'Email reputation tốt' : 'Email reputation đáng ngờ';
+    case 'EmailBlacklisted': return 'Email/domain bị blacklist';
+    case 'EmailProvider': return safe ? 'Nhà cung cấp email phổ biến' : 'Email dùng tên miền ít phổ biến';
+    case 'EmailImpersonation': return 'Email có dấu hiệu giả mạo';
+    case 'PhoneFormat': case 'PhoneVN': return 'SĐT hợp lệ';
+    case 'PhoneInternational': return 'SĐT quốc tế cần kiểm tra';
+    case 'HashFormat': return 'Hash đúng định dạng';
+    case 'HashReputation': return 'Hash cần đối chiếu threat intelligence';
+    case 'ImageInput': return 'Ảnh đã được nhận diện';
+    case 'ImageOCR': return safe ? 'Đã trích xuất văn bản trong ảnh' : 'Ảnh cần OCR/QR backend';
+    case 'QRDetection': return safe ? 'Không phát hiện QR Code' : 'Ảnh chứa QR Code';
+    case 'TextInput': return 'Văn bản đã được nhận diện';
+    case 'TextInsufficient': return 'Văn bản chưa đủ dữ liệu để kết luận';
+    case 'ExternalIntelMissing': return 'Chưa có dữ liệu từ nguồn uy tín bên ngoài';
+    case 'ScamText': return 'Văn bản có từ khóa lừa đảo';
+    case 'ImageScamText': return 'Ảnh có nội dung lừa đảo';
+    case 'ImageBrandText': return 'Dấu hiệu dùng thương hiệu ngân hàng/ví';
+    case 'ImageExtractedURL': return 'Ảnh chứa URL';
+    case 'ImageExtractedEmail': return 'Ảnh chứa email';
+    case 'ImageExtractedPhone': return 'Ảnh chứa SĐT';
+    case 'TellowsSpam': return 'Tellows báo spam';
+    case 'TellowsScore': return 'Tellows chưa báo spam cao';
+    case 'PhoneCommunityReport': return 'SĐT bị cộng đồng báo cáo';
+    case '@ Symbol': case 'AtSymbol': case 'Redirecting using //': return safe ? 'Không chứa @ hoặc chuyển hướng ẩn' : 'URL chứa @ hoặc chuyển hướng ẩn';
     case 'Tiny URL': return safe ? 'URL không rút gọn' : 'URL rút gọn';
-    case 'IP Address': case 'IPHost': return safe ? 'Không dùng IP trực tiếp' : 'Dùng địa chỉ IP trực tiếp';
+    case 'IP Address': case 'IPHost': case 'IPFormat': case 'PublicIP': return safe ? 'Không dùng IP trực tiếp' : 'Dùng địa chỉ IP trực tiếp';
+    case 'PrivateIP': return 'IP thuộc dải nội bộ';
     case 'LongURL': case 'URL Length': return safe ? 'Độ dài URL hợp lệ' : 'URL quá dài';
+    case 'ReputationVerified': return 'Danh sách tin cậy';
+    case 'CleanScan': return 'Không phát hiện mối đe dọa';
+    case 'HTTPS in URL\'s domain part': return safe ? 'Không có HTTPS giả trong tên miền' : 'Tên miền chứa chuỗi HTTPS giả mạo';
     default: return _stripSentence(fallbackText || featureTranslations[key] || key);
   }
 };
@@ -239,6 +298,7 @@ const _collectFeatureChips = (state) => {
   const addChip = (raw) => {
     const key = raw.key || raw.label || raw.text;
     const level = raw.level || _levelFromValue(String(raw.value));
+    if (level === 'safe' && HIDE_SAFE_SIGNAL_KEYS.has(key)) return;
     const label = _labelForSignal(key, raw.value != null ? String(raw.value) : level, raw.text || raw.label);
     const canonical = _canonicalKey(key, label);
     const group = _groupFromLevel(level);
@@ -258,6 +318,8 @@ const _collectFeatureChips = (state) => {
     if (!['-1', '0', '1', '2'].includes(value)) return;
     addChip({ key, value, label:featureTranslations[key] || key });
   });
+  (state.checkedSources || []).forEach(src => addChip({ key:`SourceChecked:${src}`, level:'safe', text:`Nguồn đã dùng: ${src}` }));
+  (state.missingSources || []).forEach(src => addChip({ key:`SourceMissing:${src}`, level:'warning', text:`Nguồn chưa dùng: ${src}` }));
 
   used.forEach(v => chips.push(v));
   const order = { positive:0, warning:1, danger:2 };
@@ -269,20 +331,20 @@ const _collectFeatureChips = (state) => {
 // Render unified feature chips
 // ─────────────────────────────────────────────────────────────────────────────
 const renderState = (state, domain) => {
-  const { isWhiteList, isBlocked, isPhish, legitimatePercent, status, isUnknown } = state;
-
-  if (isWhiteList) {
-    $('#pluginBody').hide(); $('#isSafe').show(); $('#isSafe .site-url').text(domain); return;
+  let displayState = { ...(state || {}) };
+  if (displayState.isWhiteList) {
+    displayState = { ...displayState, isPhish:false, legitimatePercent:100, status:'SUCCESS', result:{ ReputationVerified:'-1' }, explanations:[{ key:'ReputationVerified', level:'safe', text:'Website nằm trong danh sách tin cậy.' }] };
   }
-  if (isBlocked) {
-    $('#pluginBody').hide(); $('#isPhishing').show(); $('#isPhishing .site-url').text(isBlocked); return;
+  if (displayState.isBlocked) {
+    displayState = { ...displayState, isPhish:true, legitimatePercent:0, status:'SUCCESS', result:{ MalwareReputation:'1' }, explanations:[{ key:'MalwareReputation', level:'danger', text:'Website nằm trong danh sách đen đã xác nhận.' }] };
   }
+  const { isPhish, legitimatePercent, status, isUnknown } = displayState;
 
   _cleanDyn();
 
   const featureList = document.getElementById('features');
   featureList.innerHTML = '';
-  const { chips, counts } = _collectFeatureChips(state);
+  const { chips, counts } = _collectFeatureChips(displayState);
   const positive = chips.filter(c => c.group === 'positive');
   const warning = chips.filter(c => c.group === 'warning');
   const danger = chips.filter(c => c.group === 'danger');
@@ -341,6 +403,84 @@ const renderState = (state, domain) => {
   $('#domain_url').text(domain);
 };
 
+
+const riskLabelFromState = (state, pct, risk = null) => {
+  const r = risk != null ? risk : (state && state.riskScore != null ? parseInt(state.riskScore) : (isNaN(pct) ? 50 : 100 - pct));
+  const hasExternal = !!(state && state.externalIntel);
+  if (state && state.isPhish) return 'Nguy hiểm';
+  if (r >= 80) return 'Rất nguy hiểm';
+  if (r >= 60) return 'Nguy hiểm';
+  if (r >= 40) return 'Nghi ngờ';
+  if (r >= 20) return 'Cần thận trọng';
+  if (!hasExternal && state && state.scanMode === 'manual') return 'Đánh giá hạn chế';
+  if (r >= 8) return 'Khá an toàn';
+  return 'An toàn';
+};
+
+const _renderChipList = (listEl, state) => {
+  listEl.innerHTML = '';
+  const { chips, counts } = _collectFeatureChips(state || {});
+  _appendChipGroup(listEl, 'TÍN HIỆU TÍCH CỰC', chips.filter(c => c.group === 'positive'), counts);
+  _appendChipGroup(listEl, 'TÍN HIỆU CẢNH BÁO', chips.filter(c => c.group === 'warning'), counts);
+  _appendChipGroup(listEl, 'TÍN HIỆU NGUY HIỂM', chips.filter(c => c.group === 'danger'), counts);
+};
+
+const renderManualScanState = (state) => {
+  latestManualScanState = state || null;
+  const box = document.getElementById('manualResult');
+  const target = document.getElementById('manualTarget');
+  const score = document.getElementById('manualScore');
+  const list = document.getElementById('manualFeatures');
+  if (!box || !target || !score || !list || !state) return;
+  target.textContent = `${(state.targetType || 'object').toUpperCase()}: ${state.targetValue || state.url || ''}`;
+  const risk = state.riskScore != null ? parseInt(state.riskScore) : (state.legitimatePercent != null ? 100 - parseInt(state.legitimatePercent) : 0);
+  const hasExternalIntel = !!state.externalIntel;
+  let statusText;
+  let statusClass;
+  if (state.isPhish || risk >= 55) { statusText = 'Nguy hiểm'; statusClass = 'danger'; }
+  else if (risk >= 20) { statusText = 'Cần thận trọng'; statusClass = 'caution'; }
+  else if (!hasExternalIntel) { statusText = 'Đánh giá hạn chế'; statusClass = 'limited'; }
+  else { statusText = 'An toàn'; statusClass = 'safe'; }
+  score.textContent = statusText;
+  score.className = `manual-score ${statusClass}`;
+  _renderChipList(list, state);
+  box.hidden = false;
+  const line = manualTrustLine(state);
+  if (line) setManualStatus(line);
+};
+
+const setManualStatus = (text) => {
+  const el = document.getElementById('manualStatus');
+  if (el) el.textContent = text || '';
+};
+const manualTrustLine = (state) => {
+  if (!state) return '';
+  const rep = state.reputationScore != null ? parseInt(state.reputationScore) : (state.legitimatePercent != null ? parseInt(state.legitimatePercent) : null);
+  const conf = state.confidenceScore != null ? parseInt(state.confidenceScore) : (state.confidence != null ? parseInt(state.confidence) : null);
+  const parts = [];
+  if (rep != null && !isNaN(rep)) parts.push(`Uy tín: ${rep}%`);
+  if (conf != null && !isNaN(conf)) parts.push(`Độ tin cậy đánh giá: ${conf}%`);
+  return parts.join(' · ');
+};
+
+const renderLocalManualFallback = (input, meta = {}) => {
+  try {
+    if (!window.AntiScamScanPlatform) return false;
+    const target = AntiScamScanPlatform.detectTarget(input, meta);
+    if (['url', 'domain'].includes(target.type)) return false;
+    renderManualScanState(AntiScamScanPlatform.localScanTarget(target));
+    return true;
+  } catch (_) { return false; }
+};
+
+const scheduleManualRefresh = () => {
+  setTimeout(() => {
+    chrome.runtime.sendMessage({ type:'GET_MANUAL_SCAN_RESULT' }, (state) => {
+      if (!chrome.runtime.lastError && state) renderManualScanState(state);
+    });
+  }, 3200);
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Main — polling LIÊN TỤC (dynamic score — Vấn đề 8, 9)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -393,6 +533,70 @@ chrome.tabs.query({ currentWindow: true, active: true }, ([tab]) => {
 });
 
 
+// Manual scan + quick actions
+const manualInput = document.getElementById('manualInput');
+const manualScanBtn = document.getElementById('manualScanBtn');
+const selectModeBtn = document.getElementById('selectModeBtn');
+const fileScanInput = document.getElementById('fileScanInput');
+const runManualScan = (input, meta = {}) => {
+  const value = (input || '').trim();
+  if (!value && meta.kind !== 'file') { setManualStatus('Vui lòng nhập đối tượng cần quét.'); return; }
+  setManualStatus('Đang quét...');
+  chrome.runtime.sendMessage({ type:'MANUAL_SCAN_REQUEST', input:value, meta }, (resp) => {
+    if (chrome.runtime.lastError || !resp || !resp.ok) {
+      const okLocal = renderLocalManualFallback(value, meta);
+      setManualStatus(okLocal ? (manualTrustLine(latestManualScanState) || 'Đánh giá hạn chế') : 'Không quét được đối tượng. Hãy kiểm tra API_BASE_URL/backend rồi thử lại.');
+      return;
+    }
+    renderManualScanState(resp.state);
+    setManualStatus(manualTrustLine(resp.state) || 'Đã quét xong.');
+    scheduleManualRefresh();
+  });
+};
+if (manualScanBtn && manualInput) {
+  manualScanBtn.addEventListener('click', () => runManualScan(manualInput.value, { source:'manual' }));
+  manualInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runManualScan(manualInput.value, { source:'manual' }); });
+}
+if (selectModeBtn) {
+  selectModeBtn.addEventListener('click', () => {
+    setManualStatus('Đang bật chế độ chọn đối tượng trên trang...');
+    chrome.tabs.query({ currentWindow:true, active:true }, ([tab]) => {
+      if (!tab) { setManualStatus('Không tìm thấy tab hiện tại.'); return; }
+      chrome.runtime.sendMessage({ type:'ENABLE_SELECT_MODE', tabId: tab.id }, (resp) => {
+        if (chrome.runtime.lastError || !resp || !resp.ok) setManualStatus('Không bật được chế độ chọn đối tượng trên trang này.');
+        else setManualStatus('Di chuột trên trang, click vào đối tượng cần quét.');
+      });
+    });
+  });
+}
+if (fileScanInput) {
+  fileScanInput.addEventListener('change', async () => {
+    const file = fileScanInput.files && fileScanInput.files[0];
+    if (!file) return;
+    try {
+      if ((file.type || '').startsWith('image/')) {
+        setManualStatus('Đang quét ảnh cục bộ...');
+        const imageScan = await AntiScamScanPlatform.scanImageFile(file);
+        const ent = imageScan.entities || {};
+        const chained = imageScan.qrText || (ent.urls && ent.urls[0]) || (ent.emails && ent.emails[0]) || (ent.phones && ent.phones[0]);
+        runManualScan(chained || file.name, { kind:'image', fileName:file.name, size:file.size, mime:file.type, imageScan });
+      } else {
+        setManualStatus('Đang tạo SHA256 cho file...');
+        const buffer = await file.arrayBuffer();
+        const hash = await AntiScamScanPlatform.sha256ArrayBuffer(buffer);
+        runManualScan(hash, { kind:'file', fileName:file.name, size:file.size, mime:file.type, hash });
+      }
+    } catch (_) {
+      setManualStatus('Không đọc được file.');
+    } finally {
+      fileScanInput.value = '';
+    }
+  });
+}
+chrome.runtime.sendMessage({ type:'GET_MANUAL_SCAN_RESULT' }, (state) => {
+  if (!chrome.runtime.lastError && state) renderManualScanState(state);
+});
+
 // Community report UI
 const reportToggle = document.getElementById('reportToggle');
 const reportForm = document.getElementById('reportForm');
@@ -426,7 +630,7 @@ if (sendReport) {
     const reason = (reasonEl && reasonEl.value || '').trim();
     if (!reason) { if (statusEl) statusEl.textContent = 'Vui lòng nhập lý do.'; return; }
     if (statusEl) statusEl.textContent = 'Đang gửi...';
-    chrome.runtime.sendMessage({ type:'COMMUNITY_REPORT', payload:{ url: currentTabUrl, domain: currentDomain, reason } }, (resp) => {
+    chrome.runtime.sendMessage({ type:'COMMUNITY_REPORT', payload:{ url: currentTabUrl, domain: currentDomain, reason, type: latestManualScanState && latestManualScanState.targetType, value: latestManualScanState && latestManualScanState.targetValue } }, (resp) => {
       if (chrome.runtime.lastError || !resp || !resp.ok) {
         if (statusEl) statusEl.textContent = 'Không gửi được báo cáo.';
         return;

@@ -4,8 +4,9 @@
   "description": "antiscam.vn backend",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "nodemon index.js"
+    "test": "node -c index.js",
+    "dev": "vercel dev",
+    "check": "node -c index.js && node -c api/[...path].js"
   },
   "keywords": [
     "antiscam.vn"
@@ -17,6 +18,7 @@
     "body-parser": "^1.19.0",
     "config": "^3.3.3",
     "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
     "express": "^4.17.1",
     "express-rate-limit": "^5.2.3",
     "http-status": "^1.5.0",

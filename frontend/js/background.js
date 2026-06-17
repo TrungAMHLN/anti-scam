@@ -19,10 +19,12 @@ const logger = {
 const ANALYSIS_STATUS = Object.freeze({ IDLE:'IDLE', ANALYZING:'ANALYZING', SUCCESS:'SUCCESS', FAILED:'FAILED', OFFLINE:'OFFLINE' });
 const BLACKLIST_TTL_MS = 60*60*1000, OPENPHISH_TTL_MS = 15*60*1000, CLASSIFIER_TTL_MS = 5*60*1000;
 const RESULT_CACHE_TTL_MS = 10*60*1000, INTEL_CACHE_TTL_MS = 30*60*1000, FETCH_TIMEOUT_MS = 10_000, MAX_RETRIES = 3;
-const API_BASE = 'https://api.chongluadao.vn';
-const BACKEND_BASE = API_BASE;
+const API_BASE = 'https://api.chongluadao.vn'; // legacy CLD list/classifier source only
+const DEFAULT_BACKEND_BASE = (self.ANTISCAM_API_CONFIG && self.ANTISCAM_API_CONFIG.PRODUCTION_API_BASE_URL) || '';
+const DEV_BACKEND_BASE = (self.ANTISCAM_API_CONFIG && self.ANTISCAM_API_CONFIG.DEVELOPMENT_API_BASE_URL) || 'http://localhost:3000';
 const OPENPHISH_URL = 'https://raw.githubusercontent.com/openphish/public_feed/refs/heads/main/feed.txt';
 const PORT_REDIRECT = 'REDIRECT_PORT_NAME', PORT_CLOSE_TAB = 'CLOSE_TAB_PORT_NAME';
+const MANUAL_SCAN_RESULT_KEY = 'manual_scan_result';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Circuit Breaker
@@ -50,85 +52,56 @@ const fetchWithRetry = async (u, source, isJson=true, retries=MAX_RETRIES) => {
   recFail(source); return null;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Storage helpers
-// ─────────────────────────────────────────────────────────────────────────────
-const getTabState = async (tabId) => { try { const d = await chrome.storage.session.get(`tab_${tabId}`); return d[`tab_${tabId}`] || null; } catch(e){ return null; } };
-const setTabState = async (tabId, state) => { try { await chrome.storage.session.set({ [`tab_${tabId}`]: { ...state, updatedAt: Date.now() } }); } catch(e){ logger.error('setTabState', e); } };
-const removeTabState = async (tabId) => { try { await chrome.storage.session.remove(`tab_${tabId}`); } catch(e){} };
-
-const getUrlCache = async (url) => {
+const getBackendBases = async () => {
+  let custom = '';
   try {
-    let h=0; for (let i=0;i<url.length;i++){ h=((h<<5)-h)+url.charCodeAt(i); h|=0; }
-    const d = await chrome.storage.session.get(`cache_${h}`);
-    const it = d[`cache_${h}`]; if (it && Date.now()-it.timestamp < RESULT_CACHE_TTL_MS) return it;
-  } catch(e){}
-  return null;
-};
-const setUrlCache = async (url, data) => {
-  try {
-    let h=0; for (let i=0;i<url.length;i++){ h=((h<<5)-h)+url.charCodeAt(i); h|=0; }
-    await chrome.storage.session.set({ [`cache_${h}`]: { ...data, timestamp: Date.now() } });
-  } catch(e){}
+    const storageKey = (self.ANTISCAM_API_CONFIG && self.ANTISCAM_API_CONFIG.STORAGE_KEY) || 'antiscamApiBaseUrl';
+    const cfg = await chrome.storage.local.get([storageKey, 'antiscamBackendBase']);
+    custom = (cfg[storageKey] || cfg.antiscamBackendBase || '').replace(/\/$/, '');
+  } catch (_) {}
+  const bases = [custom, DEFAULT_BACKEND_BASE, DEV_BACKEND_BASE]
+    .filter(Boolean)
+    .map(b => b.replace(/\/$/, ''));
+  return [...new Set(bases)];
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// RDAP Domain Age
-// ─────────────────────────────────────────────────────────────────────────────
-const _pickRdapDate = (events, names) => {
-  if (!Array.isArray(events)) return null;
-  const wanted = names.map(n => String(n).toLowerCase());
-  const ev = events.find(e => wanted.includes(String(e.eventAction || '').toLowerCase()));
-  return ev && ev.eventDate ? ev.eventDate : null;
-};
-
-const fetchDomainAge = async (domain) => {
-  try {
-    let base = domain;
-    try { if (typeof psl !== 'undefined') base = psl.parse(domain).domain || domain; } catch(e){}
-    const key = `age_${base}`;
-    const cached = await chrome.storage.session.get(key);
-    if (cached && cached[key] !== undefined) {
-      const c = cached[key];
-      if (typeof c === 'number') return { ageDays: c, source: 'rdap-cache' };
-      return c;
+const fetchBackendJson = async (path, options = {}, timeoutMs = 6500) => {
+  const bases = await getBackendBases();
+  for (const base of bases) {
+    const url = `${base}${path}`;
+    const method = String(options.method || 'GET').toUpperCase();
+    const started = Date.now();
+    try {
+      console.info('[AntiScam Backend Request]', method, url, 'body=', (options.body || '').toString().slice(0, 500));
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), timeoutMs);
+      const res = await fetch(url, { ...options, signal: ctrl.signal });
+      clearTimeout(t);
+      const text = await res.text();
+      console.info('[AntiScam Backend Response]', method, url, 'status=', res.status, 'ms=', Date.now() - started, 'body=', text.slice(0, 700));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      try { return JSON.parse(text); } catch (_) { return null; }
+    } catch (err) {
+      logger.warn(`backend ${url} unavailable:`, err.message);
     }
-    const ctrl = new AbortController(); const t = setTimeout(()=>ctrl.abort(), 3500);
-    const res = await fetch(`https://rdap.org/domain/${base}`, { signal: ctrl.signal }); clearTimeout(t);
-    if (!res.ok) return { ageDays: -1, source: 'rdap', status: 'nodata' };
-    const data = await res.json();
-    const registrationDate = _pickRdapDate(data && data.events, ['registration']);
-    const expirationDate = _pickRdapDate(data && data.events, ['expiration', 'expiry']);
-    const ageDays = registrationDate ? (Date.now() - new Date(registrationDate).getTime())/(1000*60*60*24) : -1;
-    const info = { ageDays, registrationDate, expirationDate, source: 'rdap' };
-    await chrome.storage.session.set({ [key]: info });
-    return info;
-  } catch (err) { logger.warn(`fetchDomainAge ${domain}:`, err.message); }
-  return { ageDays: -1, source: 'rdap', status: 'error' };
-};
-
-const fetchBackendIntel = async (urlString, domain) => {
-  try {
-    let base = domain;
-    try { if (typeof psl !== 'undefined') base = psl.parse(domain).domain || domain; } catch(e){}
-    const key = `intel_${base}`;
-    const cached = await chrome.storage.session.get(key);
-    if (cached && cached[key] && Date.now() - cached[key].timestamp < INTEL_CACHE_TTL_MS) return cached[key].data;
-    const payload = encodeURIComponent(urlString || domain || '');
-    const data = await fetchWithRetry(`${BACKEND_BASE}/v1/intel?url=${payload}`, 'backendIntel', true, 1);
-    if (data && data.status !== 'error') {
-      await chrome.storage.session.set({ [key]: { data, timestamp: Date.now() } });
-      return data;
-    }
-  } catch (err) { logger.warn(`fetchBackendIntel ${domain}:`, err.message); }
+  }
   return null;
 };
 
-const mergeDomainAge = (rdapAge, backendAge) => {
-  if (backendAge && backendAge.ageDays != null && backendAge.ageDays >= 0) return backendAge;
-  if (rdapAge && rdapAge.ageDays != null) return rdapAge;
-  if (typeof rdapAge === 'number') return { ageDays: rdapAge };
-  return { ageDays: -1 };
+const fetchBackendJsonAny = async (paths, options = {}, timeoutMs = 6500) => {
+  for (const path of paths) {
+    const data = await fetchBackendJson(path, options, timeoutMs);
+    if (data) return data;
+  }
+  return null;
+};
+
+const scanApiPathForTarget = (type) => {
+  if (type === 'email') return '/api/scan-email';
+  if (type === 'phone') return '/api/scan-phone';
+  if (type === 'image' || type === 'qr') return '/api/scan-image';
+  if (type === 'url' || type === 'domain' || type === 'ip') return '/api/scan-url';
+  return '/v1/scan-object';
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -249,6 +222,119 @@ const updateBadge = (isPhishing, finalScore, tabId) => {
   chrome.action.setTitle({ title, tabId }).catch(()=>{});
   chrome.action.setIcon({ path: 'assets/antiScamLogo.png', tabId }).catch(()=>{});
 };
+
+const setManualScanResult = async (state) => {
+  try { await chrome.storage.session.set({ [MANUAL_SCAN_RESULT_KEY]: { ...state, updatedAt: Date.now() } }); } catch(e) { logger.warn('setManualScanResult', e.message); }
+};
+const getManualScanResult = async () => {
+  try { const d = await chrome.storage.session.get(MANUAL_SCAN_RESULT_KEY); return d[MANUAL_SCAN_RESULT_KEY] || null; } catch (_) { return null; }
+};
+
+const _stateFromAssessment = (target, urlString, assessment, domainAge, reputation) => ({
+  status: ANALYSIS_STATUS.SUCCESS,
+  scanMode: 'manual',
+  targetType: target.type,
+  targetValue: target.displayValue || target.value,
+  url: urlString,
+  isPhish: assessment.finalScore <= 30,
+  legitimatePercent: assessment.finalScore,
+  confidence: assessment.confidence,
+  trustScore: assessment.trustScore,
+  riskScore: assessment.riskScore,
+  isUnknown: assessment.isUnknown,
+  result: assessment.result || {},
+  summary: assessment.summary,
+  explanations: assessment.explanations || [],
+  domainAge: assessment.domainAge || domainAge,
+  reputation,
+  externalIntel: !!(reputation && ((reputation.malware && ((reputation.malware.checked || []).length || reputation.malware.dangerous)) || (reputation.dns && (reputation.dns.ip || reputation.dns.asn)) || reputation.communityReports > 0)),
+  assessmentLimited: !(reputation && ((reputation.malware && ((reputation.malware.checked || []).length || reputation.malware.dangerous)) || (reputation.dns && (reputation.dns.ip || reputation.dns.asn)) || reputation.communityReports > 0)),
+});
+
+const scanUrlLikeTarget = async (target) => {
+  const urlString = target.type === 'url' ? AntiScamScanPlatform.normalizeUrl(target.value) : `https://${target.value}`;
+  const domain = getDomain(urlString);
+  const registrable = getRegistrable(domain);
+  const [rdapAge, backendIntel] = await Promise.all([
+    fetchDomainAge(domain),
+    fetchBackendIntel(urlString, domain),
+  ]);
+  const domainAge = mergeDomainAge(rdapAge, backendIntel && backendIntel.domainAge);
+  const domainAgeDays = domainAge.ageDays != null ? domainAge.ageDays : -1;
+  const reputation = resolveReputation(domain, registrable, urlString, backendIntel);
+  const assessment = computeScore(urlString, {
+    dom: { scanned:false, contentRich:false },
+    domainAgeDays,
+    domainAge,
+    reputation,
+    redirectChain: [],
+    stabilityMs: 0,
+  });
+  return _stateFromAssessment(target, urlString, assessment, domainAge, reputation);
+};
+
+const mergeBackendObjectScan = (localState, backendData) => {
+  if (!backendData || backendData.status === 'error') return localState;
+  const result = { ...(localState.result || {}), ...(backendData.result || {}) };
+  const explanations = [ ...(localState.explanations || []), ...((backendData.explanations || []).filter(Boolean)) ];
+  const riskScore = Math.max(localState.riskScore || 0, backendData.riskScore || 0);
+  const finalScore = backendData.finalScore != null ? Math.min(localState.legitimatePercent, backendData.finalScore) : localState.legitimatePercent;
+  const externalIntel = !!(backendData.externalIntel || backendData.hasExternalIntel);
+  return {
+    ...localState,
+    legitimatePercent: finalScore,
+    isPhish: finalScore <= 30,
+    riskScore,
+    reputationScore: backendData.reputationScore != null ? backendData.reputationScore : finalScore,
+    confidenceScore: backendData.confidenceScore != null ? backendData.confidenceScore : (externalIntel ? 70 : localState.confidence),
+    checkedSources: backendData.checkedSources || localState.checkedSources || [],
+    missingSources: backendData.missingSources || localState.missingSources || [],
+    externalIntel: externalIntel || !!localState.externalIntel,
+    assessmentLimited: !(externalIntel || !!localState.externalIntel),
+    isUnknown: !(externalIntel || !!localState.externalIntel),
+    result,
+    explanations,
+    summary: backendData.summary || localState.summary,
+  };
+};
+
+const runUnifiedScan = async (input, meta = {}) => {
+  const target = AntiScamScanPlatform.detectTarget(input, meta);
+  const imageScan = (target.meta && target.meta.imageScan) || meta.imageScan || {};
+  const qrText = imageScan.qrText || meta.qrText;
+  if (target.type === 'image') {
+    const ent = imageScan.entities || {};
+    const chained = qrText || (ent.urls && ent.urls[0]) || (ent.emails && ent.emails[0]) || (ent.phones && ent.phones[0]);
+    if (chained) {
+      const chainedTarget = AntiScamScanPlatform.detectTarget(chained, { source:'image-entity', imageSource: target.value });
+      if (chainedTarget.type !== 'text' && chainedTarget.type !== 'image') return runUnifiedScan(chainedTarget.value, chainedTarget.meta);
+    }
+  }
+  if (['url', 'domain', 'ip'].includes(target.type)) return scanUrlLikeTarget(target);
+
+  const localState = AntiScamScanPlatform.localScanTarget(target);
+  const apiPath = scanApiPathForTarget(target.type);
+  try {
+    const data = await fetchBackendJsonAny([apiPath, '/v1/scan-object'], {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: target.value, type: target.type, meta: target.meta || {}, displayValue: target.displayValue })
+    }, 15000);
+    if (data) return mergeBackendObjectScan(localState, data);
+  } catch (err) { logger.warn('scan-object backend', err.message); }
+  // Backend unreachable: return limited local identification only, never a safe verdict.
+  return localState;
+};
+
+const createContextMenus = () => {
+  try {
+    chrome.contextMenus.removeAll(() => {
+      chrome.contextMenus.create({ id: 'antiscam-root', title: 'AntiScam', contexts: ['selection', 'link', 'image', 'page'] });
+      chrome.contextMenus.create({ id: 'antiscam-scan-object', parentId: 'antiscam-root', title: 'Quét đối tượng', contexts: ['selection', 'link', 'image', 'page'] });
+    });
+  } catch (err) { logger.warn('contextMenus', err.message); }
+};
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CLASSIFICATION  —  ENGINE V2 (Trust / Risk / Confidence)
@@ -418,6 +504,36 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const tabId = request.tabId; if (!tabId) { sendResponse(null); return true; }
     getTabState(tabId).then(sendResponse).catch(()=>sendResponse(null)); return true;
   }
+  if (request.type === 'MANUAL_SCAN_REQUEST') {
+    runUnifiedScan(request.input || '', { ...(request.meta || {}), source:'manual' })
+      .then(async (state) => { await setManualScanResult(state); sendResponse({ ok:true, state }); })
+      .catch(err => { logger.warn('MANUAL_SCAN_REQUEST', err.message); sendResponse({ ok:false, message: err.message }); });
+    return true;
+  }
+  if (request.type === 'GET_MANUAL_SCAN_RESULT') {
+    getManualScanResult().then(state => sendResponse(state)).catch(()=>sendResponse(null));
+    return true;
+  }
+  if (request.type === 'ENABLE_SELECT_MODE') {
+    const tabId = request.tabId;
+    if (!tabId) { sendResponse({ ok:false }); return true; }
+    chrome.tabs.sendMessage(tabId, { type:'ENABLE_SELECT_MODE' }, (resp) => {
+      if (chrome.runtime.lastError) sendResponse({ ok:false, message: chrome.runtime.lastError.message });
+      else sendResponse(resp || { ok:true });
+    });
+    return true;
+  }
+  if (request.type === 'SCAN_SELECTED_OBJECT') {
+    const payload = request.payload || {};
+    runUnifiedScan(payload.input || payload.value || '', { ...(payload.meta || {}), kind: payload.kind, srcUrl: payload.srcUrl, source:'select-mode' })
+      .then(async (state) => {
+        await setManualScanResult(state);
+        chrome.notifications.create({ type:'basic', iconUrl: chrome.runtime.getURL('assets/antiScamLogo.png'), title:'AntiScam', message:'Đã quét đối tượng được chọn. Mở popup để xem kết quả.' }).catch(()=>{});
+        sendResponse({ ok:true, state });
+      })
+      .catch(err => { logger.warn('SCAN_SELECTED_OBJECT', err.message); sendResponse({ ok:false, message: err.message }); });
+    return true;
+  }
   if (request.type === 'SET_WHITELIST_TEMP') {
     const tabId = request.tabId; if (!tabId) { sendResponse({ ok:false }); return true; }
     setTabState(tabId, { status: ANALYSIS_STATUS.IDLE, isWhiteList:null, isBlocked:null, url:null })
@@ -425,12 +541,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
   if (request.type === 'COMMUNITY_REPORT') {
     const payload = request.payload || {};
-    fetch(`${BACKEND_BASE}/v1/community-report`, {
+    fetchBackendJson('/v1/community-report', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: payload.url, domain: payload.domain, reason: payload.reason })
-    }).then(r => r.json()).then(data => sendResponse({ ok:true, data })).catch(err => {
+      body: JSON.stringify({ url: payload.url, domain: payload.domain, reason: payload.reason, type: payload.type, value: payload.value })
+    }, 6500).then(data => sendResponse({ ok: !!data, data })).catch(err => {
       logger.warn('COMMUNITY_REPORT', err.message); sendResponse({ ok:false });
     });
+    return true;
+  }
+  if (request.type === 'CLEAR_SCAN_CACHE') {
+    chrome.storage.session.clear().then(() => sendResponse({ ok:true })).catch(() => sendResponse({ ok:false }));
     return true;
   }
   if (request.type === 'SET_ICON') {
@@ -476,13 +596,49 @@ chrome.runtime.onConnect.addListener((port) => {
 
 chrome.webRequest.onBeforeRequest.addListener(safeCheck, { urls: ['*://*/*'], types: ['main_frame'] });
 
+if (chrome.contextMenus && chrome.contextMenus.onClicked) {
+  chrome.contextMenus.onClicked.addListener((info) => {
+    if (info.menuItemId !== 'antiscam-scan-object') return;
+    const isImage = !!info.srcUrl;
+    const input = info.linkUrl || info.selectionText || info.srcUrl || info.pageUrl || '';
+    const meta = { source:'context-menu', linkUrl: info.linkUrl, srcUrl: info.srcUrl, pageUrl: info.pageUrl, kind: isImage ? 'image' : undefined };
+    runUnifiedScan(input, meta).then(async (state) => {
+      await setManualScanResult(state);
+      chrome.notifications.create({ type:'basic', iconUrl: chrome.runtime.getURL('assets/antiScamLogo.png'), title:'AntiScam', message:'Đã quét đối tượng. Mở popup để xem kết quả.' }).catch(()=>{});
+    }).catch(err => logger.warn('context scan', err.message));
+  });
+}
+
 
 // Download risk guard — pause dangerous files from suspicious pages and ask user.
 const DANGEROUS_DOWNLOAD_EXTS = ['.exe', '.scr', '.bat', '.cmd', '.apk', '.jar', '.ps1'];
+const ARCHIVE_DOWNLOAD_EXTS = ['.zip', '.rar', '.7z'];
 const pendingDownloads = new Map();
 const _downloadExt = (u, filename='') => {
   const raw = (filename || u || '').split('?')[0].split('#')[0].toLowerCase();
   return DANGEROUS_DOWNLOAD_EXTS.find(ext => raw.endsWith(ext)) || null;
+};
+const _archiveDownloadExt = (u, filename='') => {
+  const raw = (filename || u || '').split('?')[0].split('#')[0].toLowerCase();
+  return ARCHIVE_DOWNLOAD_EXTS.find(ext => raw.endsWith(ext)) || null;
+};
+const _scanDownloadFileIntel = async (item) => {
+  try {
+    const fileUrl = item.finalUrl || item.url || '';
+    const name = item.filename || fileUrl;
+    const ext = _downloadExt(fileUrl, name) || _archiveDownloadExt(fileUrl, name);
+    if (!ext || !/^https?:\/\//i.test(fileUrl)) return;
+    const head = await fetch(fileUrl, { method:'HEAD' }).catch(()=>null);
+    const len = head && head.headers ? parseInt(head.headers.get('content-length') || '0') : 0;
+    if (len && len > 25 * 1024 * 1024) return;
+    const res = await fetch(fileUrl);
+    if (!res.ok) return;
+    const buffer = await res.arrayBuffer();
+    if (buffer.byteLength > 25 * 1024 * 1024) return;
+    const hash = await AntiScamScanPlatform.sha256ArrayBuffer(buffer);
+    const state = await runUnifiedScan(hash, { source:'download', kind:'file', fileName:name, size:buffer.byteLength, hash });
+    await setManualScanResult(state);
+  } catch (err) { logger.warn('download file intel', err.message); }
 };
 const _isDownloadFromRiskyContext = async (item) => {
   try {
@@ -499,6 +655,7 @@ const _isDownloadFromRiskyContext = async (item) => {
 };
 if (chrome.downloads && chrome.downloads.onCreated) {
   chrome.downloads.onCreated.addListener(async (item) => {
+    _scanDownloadFileIntel(item).catch(()=>{});
     const ext = _downloadExt(item.finalUrl || item.url, item.filename);
     if (!ext) return;
     const risky = await _isDownloadFromRiskyContext(item);
@@ -528,11 +685,13 @@ if (chrome.downloads && chrome.downloads.onCreated) {
   });
 }
 
-chrome.runtime.onStartup.addListener(() => startup().catch(()=>{}));
+chrome.runtime.onStartup.addListener(() => { createContextMenus(); startup().catch(()=>{}); });
 chrome.runtime.onInstalled.addListener(() => {
+  createContextMenus();
   startup().catch(()=>{});
   chrome.notifications.create({ type:'basic', iconUrl: chrome.runtime.getURL('assets/antiScamLogo.png'),
     title: 'Cài đặt thành công v2.0!', message: 'AntiScam v2.0 — engine Trust/Risk/Confidence đã sẵn sàng.' });
 });
 
+createContextMenus();
 startup().catch(()=>{});

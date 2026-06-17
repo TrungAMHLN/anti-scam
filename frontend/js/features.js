@@ -390,6 +390,7 @@ const collect = () => {
     if (/eval\s*\(/.test(code)) { conf += conf > 0 ? 25 : 10; jsRiskIndicators.add('eval'); }
     if (/new\s+Function\s*\(/.test(code)) { conf += 15; jsRiskIndicators.add('new Function'); }
     if (/document\.write\s*\(/.test(code)) { conf += 8; jsRiskIndicators.add('document.write'); }
+    if (/WebAssembly\.(instantiate|compile)|application\/wasm|\.wasm/i.test(code)) { conf += 18; jsRiskIndicators.add('WebAssembly'); }
     if (/["'][A-Za-z0-9+/]{120,}={0,2}["']/.test(compactCode)) { conf += 18; jsRiskIndicators.add('base64 payload'); }
     if (code.length > 1500 && (code.match(/\n/g) || []).length < 4 && calcEntropy(code) > 5.2) { conf += 20; jsRiskIndicators.add('high entropy'); }
     if (TRUSTED_PAT.some(re => re.test(code))) conf = Math.max(0, conf - 20);
@@ -643,6 +644,82 @@ const startUrlWatcher = () => {
     }
   }, 2000);
 };
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SELECT MODE — chỉ chạy khi người dùng bật từ popup/context, không bật mặc định
+// ═══════════════════════════════════════════════════════════════════════════
+let __ascSelectMode = false;
+let __ascSelectOverlay = null;
+let __ascLastElement = null;
+
+const __ascEnsureOverlay = () => {
+  if (__ascSelectOverlay) return __ascSelectOverlay;
+  const el = document.createElement('div');
+  el.id = '__antiscam_select_overlay';
+  el.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;border:2px solid #06b6d4;border-radius:8px;box-shadow:0 0 0 4px rgba(6,182,212,.18);display:none;';
+  document.documentElement.appendChild(el);
+  __ascSelectOverlay = el;
+  return el;
+};
+const __ascElementText = (el) => {
+  const href = el && el.closest ? el.closest('a[href]')?.href : '';
+  if (href) return { input: href, kind: 'link' };
+  if (el && el.tagName === 'IMG') return { input: el.currentSrc || el.src, kind: 'image', srcUrl: el.currentSrc || el.src };
+  const txt = ((window.getSelection && String(window.getSelection())) || (el && el.innerText) || (el && el.textContent) || '').trim().slice(0, 2000);
+  return { input: txt, kind: 'text' };
+};
+const __ascDecodeImageQr = async (img) => {
+  try {
+    if (!('BarcodeDetector' in window) || !img) return null;
+    const detector = new BarcodeDetector({ formats: ['qr_code'] });
+    const codes = await detector.detect(img);
+    const first = codes && codes[0];
+    return first && first.rawValue ? first.rawValue : null;
+  } catch (_) { return null; }
+};
+const __ascMove = (e) => {
+  if (!__ascSelectMode) return;
+  const el = e.target;
+  if (!el || el === __ascSelectOverlay || el.id === '__antiscam_select_overlay') return;
+  __ascLastElement = el;
+  const r = el.getBoundingClientRect();
+  const ov = __ascEnsureOverlay();
+  ov.style.display = 'block';
+  ov.style.left = `${Math.max(0, r.left)}px`;
+  ov.style.top = `${Math.max(0, r.top)}px`;
+  ov.style.width = `${Math.max(1, r.width)}px`;
+  ov.style.height = `${Math.max(1, r.height)}px`;
+};
+const __ascStopSelectMode = () => {
+  __ascSelectMode = false;
+  document.removeEventListener('mousemove', __ascMove, true);
+  document.removeEventListener('click', __ascClick, true);
+  document.removeEventListener('keydown', __ascKey, true);
+  if (__ascSelectOverlay) __ascSelectOverlay.style.display = 'none';
+};
+const __ascClick = async (e) => {
+  if (!__ascSelectMode) return;
+  e.preventDefault(); e.stopPropagation();
+  const el = __ascLastElement || e.target;
+  let payload = __ascElementText(el);
+  if (el && el.tagName === 'IMG') {
+    const qr = await __ascDecodeImageQr(el);
+    if (qr) payload = { input: qr, kind: 'qr', srcUrl: el.currentSrc || el.src, meta: { qrDecoded: true, imageUrl: el.currentSrc || el.src } };
+  }
+  chrome.runtime.sendMessage({ type:'SCAN_SELECTED_OBJECT', payload }, () => {});
+  __ascStopSelectMode();
+};
+const __ascKey = (e) => { if (e.key === 'Escape') __ascStopSelectMode(); };
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.type !== 'ENABLE_SELECT_MODE') return;
+  __ascSelectMode = true;
+  __ascEnsureOverlay();
+  document.addEventListener('mousemove', __ascMove, true);
+  document.addEventListener('click', __ascClick, true);
+  document.addEventListener('keydown', __ascKey, true);
+  sendResponse({ ok: true });
+});
 
 // ═══════════════════════════════════════════════════════════════════════════
 // INIT

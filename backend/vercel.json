@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "functions": {
+    "api/[...path].js": {
+      "maxDuration": 20
+    }
+  },
+  "routes": [
+    { "src": "/api/(.*)", "dest": "/api/[...path].js" },
+    { "src": "/v1/(.*)", "dest": "/api/[...path].js" }
+  ]
+}
