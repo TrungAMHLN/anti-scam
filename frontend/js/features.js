@@ -25,6 +25,30 @@ const _TRUSTED = ['googleapis.com','google.com','gstatic.com','google-analytics.
   'ajax.aspnetcdn.com','msecnd.net','code.jquery.com','facebook.net','fbcdn.net','twitter.com','twimg.com',
   'cloudfront.net','akamai.net','akamaized.net','fastly.net','stripe.com','js.stripe.com',
   'tailwindcss.com','polyfill.io','githubassets.com','googlevideo.com'];
+const _ORG_ECOSYSTEMS = [
+  ['github.com','githubusercontent.com','githubassets.com','github.io'],
+  ['google.com','gstatic.com','googleusercontent.com','googleapis.com','googletagmanager.com','google-analytics.com','youtube.com','ytimg.com','googlevideo.com'],
+  ['microsoft.com','live.com','office.com','office365.com','microsoftonline.com','azure.com','azureedge.net','bing.com','msn.com','outlook.com'],
+  ['cloudflare.com','cdnjs.cloudflare.com','cloudflareinsights.com','challenges.cloudflare.com'],
+  ['gitlab.com','gitlab-static.net','gitlab.io'],
+  ['openai.com','chatgpt.com','oaistatic.com','oaiusercontent.com'],
+  ['facebook.com','fbcdn.net','facebook.net','instagram.com','whatsapp.com','meta.com'],
+];
+const _registrable = (host) => {
+  const h = (host || '').toLowerCase().replace(/^www\./, '');
+  const parts = h.split('.').filter(Boolean);
+  if (parts.length <= 2) return h;
+  const last2 = parts.slice(-2).join('.');
+  const last3 = parts.slice(-3).join('.');
+  if (/^(com|net|org|gov|edu|ac|biz|info)\.vn$/.test(last2) && parts.length >= 3) return last3;
+  return last2;
+};
+const _sameOrgHost = (a, b) => {
+  const ra = _registrable(a), rb = _registrable(b);
+  if (!ra || !rb) return false;
+  if (ra === rb) return true;
+  return _ORG_ECOSYSTEMS.some(group => group.includes(ra) && group.includes(rb));
+};
 const _isTrustedHost = (host) => {
   if (!host) return false;
   const h = host.toLowerCase().replace(/^www\./, '');
@@ -63,6 +87,7 @@ const BRAND_KEYS = [
   ['vietcombank','Vietcombank'],['bidv','BIDV'],['mbbank','MB'],['techcombank','Techcombank'],
   ['tpbank','TPBank'],['agribank','Agribank'],['vietinbank','VietinBank'],['vpbank','VPBank'],
   ['sacombank','Sacombank'],['momo','MoMo'],['zalopay','ZaloPay'],['zalo','Zalo'],
+  ['acb','ACB'],['tiki','Tiki'],['viettel','Viettel'],['vnpay','VNPay'],['fpt','FPT'],['vingroup','VinGroup'],['vinhomes','Vinhomes'],['vinfast','VinFast'],
   ['google','Google'],['microsoft','Microsoft'],['facebook','Facebook'],['apple','Apple'],
   ['paypal','PayPal'],['amazon','Amazon'],['netflix','Netflix'],['openai','OpenAI'],['chatgpt','ChatGPT'],
   ['telegram','Telegram'],['github','GitHub'],['shopee','Shopee'],['lazada','Lazada'],
@@ -71,8 +96,10 @@ const BRAND_OFFICIAL = {
   'vietcombank':['vietcombank.com.vn'],'bidv':['bidv.com.vn'],'mbbank':['mbbank.com.vn'],
   'techcombank':['techcombank.com.vn'],'tpbank':['tpb.vn','tpbank.vn'],'agribank':['agribank.com.vn'],
   'vietinbank':['vietinbank.vn'],'vpbank':['vpbank.vn'],'sacombank':['sacombank.com'],
-  'momo':['momo.vn'],'zalopay':['zalopay.vn'],'zalo':['zalo.me'],'google':['google.com'],
-  'microsoft':['microsoft.com'],'facebook':['facebook.com'],'apple':['apple.com'],
+  'momo':['momo.vn'],'zalopay':['zalopay.vn'],'zalo':['zalo.me'],'acb':['acb.com.vn'],
+  'tiki':['tiki.vn'],'viettel':['viettel.com.vn','viettel.vn'],'vnpay':['vnpay.vn'],'fpt':['fpt.com.vn','fpt.vn'],
+  'vingroup':['vingroup.net'],'vinhomes':['vinhomes.vn'],'vinfast':['vinfastauto.com','vinfast.vn'],
+  'google':['google.com'],'microsoft':['microsoft.com'],'facebook':['facebook.com'],'apple':['apple.com'],
   'paypal':['paypal.com'],'amazon':['amazon.com'],'netflix':['netflix.com'],
   'openai':['openai.com','chatgpt.com'],'chatgpt':['chatgpt.com','openai.com'],'telegram':['telegram.org'],'github':['github.com'],
   'shopee':['shopee.vn'],'lazada':['lazada.vn'],'mb':['mbbank.com.vn'],
@@ -97,11 +124,19 @@ const detectBrandSurfaces = () => {
     if (fl) faviconHost = _hostOf(fl.getAttribute('href'));
   } catch (_) {}
 
-  const surfaces = { title, h1, h2, meta };
+  let logoText = '';
+  try {
+    const logoEls = document.querySelectorAll('img[alt], img[src], [class*="logo"], [id*="logo"]');
+    logoText = Array.from(logoEls).slice(0, 40).map(el => [
+      el.getAttribute('alt'), el.getAttribute('src'), el.getAttribute('class'), el.getAttribute('id'), el.getAttribute('aria-label')
+    ].filter(Boolean).join(' ')).join(' ').toLowerCase().slice(0, 4000);
+  } catch (_) {}
+
+  const surfaces = { title, h1, h2, meta, logoText };
   const brandHits = {}; // key -> count of surfaces
 
   for (const [key, name] of BRAND_KEYS) {
-    if (key.length < 4) continue;
+    if (key.length < 4 && !['fpt','acb'].includes(key)) continue;
     const official = BRAND_OFFICIAL[key] || [];
     const isOfficial = official.some(d => onlyDomain === d || onlyDomain.endsWith('.' + d));
     if (isOfficial) continue;
@@ -144,7 +179,7 @@ const collect = () => {
   const sTags = document.getElementsByTagName('script');
   const lTags = document.getElementsByTagName('link');
   const imgTags = document.getElementsByTagName('img');
-  const aTags = document.getElementsByTagName('a');
+  const aTags = document.querySelectorAll('a[href]');
   const forms = document.getElementsByTagName('form');
   const iframes = document.getElementsByTagName('iframe');
 
@@ -156,7 +191,7 @@ const collect = () => {
       if (!src) continue;
       totalCount++;
       const h = _hostOf(src);
-      if (h && h !== onlyDomain && !_hostEndsWith(h, onlyDomain) && !_isTrustedHost(h)) { extCount++; externalScriptHosts.push(h); }
+      if (h && h !== onlyDomain && !_hostEndsWith(h, onlyDomain) && !_sameOrgHost(h, onlyDomain) && !_isTrustedHost(h)) { extCount++; externalScriptHosts.push(h); }
     }
   };
   countExternal(Array.from(sTags));
@@ -171,22 +206,43 @@ const collect = () => {
     if (!src) continue;
     imgTotal++;
     const h = _hostOf(src);
-    if (h && h !== onlyDomain && !_hostEndsWith(h, onlyDomain) && !_isTrustedHost(h)) imgExt++;
+    if (h && h !== onlyDomain && !_hostEndsWith(h, onlyDomain) && !_sameOrgHost(h, onlyDomain) && !_isTrustedHost(h)) imgExt++;
   }
   let imgPct = imgTotal === 0 ? 0 : (imgExt / imgTotal) * 100;
   result['Request URL'] = (imgPct > 60) ? '1' : (imgPct > 30 ? '0' : '-1');
 
-  // ── Anchor (tỷ lệ liên kết ngoài) ──
+  // ── Anchor (tỷ lệ liên kết ngoài + gửi mẫu link để background đối chiếu blacklist/heuristic) ──
   let aExt = 0, aTotal = 0;
+  const pageLinks = [];
+  const externalLinkHosts = new Set();
+  const deceptiveLinks = [];
   for (const a of aTags) {
     const href = a.getAttribute('href');
     if (!href) continue;
+    let abs = null;
+    try { abs = new URL(href, window.location.href).href; } catch (_) {}
+    if (abs && /^https?:\/\//i.test(abs) && pageLinks.length < 160) pageLinks.push(abs);
     aTotal++;
     const h = _hostOf(href);
-    if (h && h !== onlyDomain && !_hostEndsWith(h, onlyDomain) && !_isTrustedHost(h)) aExt++;
+    if (h && h !== onlyDomain && !_hostEndsWith(h, onlyDomain) && !_sameOrgHost(h, onlyDomain) && !_isTrustedHost(h)) { aExt++; externalLinkHosts.add(h); }
+    try {
+      const text = (a.textContent || '').trim().toLowerCase();
+      const m = text.match(/(?:https?:\/\/)?(?:www\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)+)/i);
+      if (m && abs) {
+        const shownHost = m[1].replace(/^www\./, '');
+        const hrefHost = new URL(abs).hostname.replace(/^www\./, '');
+        if (shownHost && hrefHost && shownHost !== hrefHost && !_hostEndsWith(shownHost, hrefHost)) {
+          deceptiveLinks.push({ text: shownHost, href: hrefHost });
+        }
+      }
+    } catch (_) {}
   }
   let aPct = aTotal === 0 ? 0 : (aExt / aTotal) * 100;
   result['Anchor'] = (aPct > 75) ? '1' : (aPct > 40 ? '0' : '-1');
+  dom.pageLinks = pageLinks;
+  dom.externalLinkHosts = Array.from(externalLinkHosts).slice(0, 40);
+  dom.deceptiveLinks = deceptiveLinks.slice(0, 10);
+  dom.deceptiveLinkCount = deceptiveLinks.length;
 
   // ── content richness (STICKY — một lần true thì không quay lại false) ──
   if (!_stickyState.contentRich) {
@@ -207,6 +263,21 @@ const collect = () => {
   dom.scamContentRisk = scamHits.length;
   result['Scam Content'] = scamHits.length >= 2 ? '2' : (scamHits.length === 1 ? '0' : '-1');
 
+  // ── Redirect abuse in DOM: meta refresh and script-based redirect hints ──
+  dom.metaRefreshRedirect = false;
+  dom.scriptRedirect = false;
+  try {
+    const metas = document.querySelectorAll('meta[http-equiv="refresh" i]');
+    for (const m of metas) {
+      const c = m.getAttribute('content') || '';
+      const hit = c.match(/url\s*=\s*([^;]+)/i);
+      if (hit) {
+        const target = new URL(hit[1].trim().replace(/^['"]|['"]$/g, ''), window.location.href);
+        if (target.hostname && target.hostname !== urlDomain && !_hostEndsWith(target.hostname, onlyDomain) && !_sameOrgHost(target.hostname, onlyDomain) && !_isTrustedHost(target.hostname)) dom.metaRefreshRedirect = true;
+      }
+    }
+  } catch (_) {}
+
   // ── BRAND surfaces ──
   const bs = detectBrandSurfaces();
   dom.brandInContent = bs.brandInContent;
@@ -221,7 +292,7 @@ const collect = () => {
     else if (action.startsWith('http')) {
       try {
         const ah = new URL(action).hostname.replace(/^www\./, '');
-        if (ah !== onlyDomain && !_hostEndsWith(ah, onlyDomain) && !_isTrustedHost(ah)) result['SFH'] = '1';
+        if (ah !== onlyDomain && !_hostEndsWith(ah, onlyDomain) && !_sameOrgHost(ah, onlyDomain) && !_isTrustedHost(ah)) result['SFH'] = '1';
       } catch (_) {}
     }
   }
@@ -338,7 +409,7 @@ const collect = () => {
         try {
           const ah = new URL(action).hostname.replace(/^www\./, '');
           const trusted = TRUSTED_FORM_HOSTS.some(h => ah === h || ah.endsWith('.' + h));
-          const same = ah === onlyDomain || _hostEndsWith(ah, onlyDomain);
+          const same = ah === onlyDomain || _hostEndsWith(ah, onlyDomain) || _sameOrgHost(ah, onlyDomain);
           if (!trusted && !same && !_isTrustedHost(ah)) hijackFound = true;
         } catch (_) {}
       }
@@ -376,6 +447,7 @@ const collect = () => {
   };
   let maxConf = 0;
   let hasKeylogger = false, hasClipboard = false, hasObf = false, hasWS = false;
+  const permissionSignals = new Set();
   const jsRiskIndicators = new Set();
   for (const s of sTags) {
     const code = s.innerHTML;
@@ -398,7 +470,15 @@ const collect = () => {
     if (/addEventListener\s*\(\s*["']keydown["']|addEventListener\s*\(\s*["']keypress["']/.test(code)) {
       if (code.length > 500 && (code.includes('XMLHttpRequest') || code.includes('fetch(') || code.includes('sendBeacon'))) hasKeylogger = true;
     }
-    if (/navigator\.clipboard\.writeText|clipboard\.writeText/.test(code)) hasClipboard = true;
+    if (/navigator\.clipboard\.writeText|clipboard\.writeText/.test(code)) { hasClipboard = true; permissionSignals.add('clipboard-write'); }
+    if (/Notification\.requestPermission|navigator\.permissions\.query\s*\(/.test(code)) permissionSignals.add('notification-or-permissions');
+    if (/navigator\.geolocation\.(getCurrentPosition|watchPosition)/.test(code)) permissionSignals.add('geolocation');
+    if (/navigator\.mediaDevices\.getUserMedia|getUserMedia\s*\(/.test(code)) permissionSignals.add('camera-microphone');
+    if (/requestFullscreen\s*\(/.test(code)) permissionSignals.add('fullscreen');
+    if (/new\s+PaymentRequest\s*\(/.test(code)) permissionSignals.add('payment-request');
+    if (/requestMIDIAccess\s*\(/.test(code)) permissionSignals.add('midi');
+    if (/Device(Motion|Orientation)Event\.requestPermission|new\s+(Accelerometer|Gyroscope|Magnetometer|AmbientLightSensor)\s*\(/.test(code)) permissionSignals.add('sensors');
+    if (/(location\.(href|replace|assign)|window\.open)\s*\(\s*["']https?:\/\//i.test(code) || /location\.(href|replace)\s*=\s*["']https?:\/\//i.test(code)) dom.scriptRedirect = true;
     if (/new\s+WebSocket\s*\(|\.io\s*\(|socket\.io/i.test(code)) hasWS = true;
   }
   dom.obfuscatedScript = hasObf || _stickyState.obfuscatedScript;
@@ -408,6 +488,9 @@ const collect = () => {
   dom.clipboardHijack = hasClipboard || _stickyState.clipboardHijack;
   _stickyState.clipboardHijack = dom.clipboardHijack;
   dom.websocket = hasWS;
+  if (permState && permState.requests) permState.requests.forEach(x => permissionSignals.add(x));
+  dom.permissionRequests = Array.from(permissionSignals).slice(0, 12);
+  dom.permissionAbuse = dom.permissionRequests.length > 0;
   dom.jsRiskScore = maxConf;
   dom.jsRiskIndicators = Array.from(jsRiskIndicators).slice(0, 8);
   result['Obfuscated Script'] = hasObf ? '1' : (maxConf >= 40 ? '0' : '-1');
@@ -425,14 +508,18 @@ const collect = () => {
 
   // ── dangerous download ──
   const DANGEROUS_EXT = ['.exe','.scr','.bat','.cmd','.ps1','.apk','.msi','.dll','.vbs','.jar'];
+  const ARCHIVE_EXT = ['.zip','.rar','.7z'];
   dom.downloadFile = false;
+  dom.archiveDownload = false;
   try {
     if (document.querySelector('a[download]') || document.querySelector('meta[http-equiv="refresh"]')) {
       const html = document.documentElement.outerHTML.toLowerCase();
       if (DANGEROUS_EXT.some(e => html.includes(e))) dom.downloadFile = true;
+      if (ARCHIVE_EXT.some(e => html.includes(e))) dom.archiveDownload = true;
     }
   } catch (_) {}
   if (DANGEROUS_EXT.some(e => window.location.pathname.toLowerCase().endsWith(e))) dom.downloadFile = true;
+  if (ARCHIVE_EXT.some(e => window.location.pathname.toLowerCase().endsWith(e))) dom.archiveDownload = true;
   dom.downloadFile = dom.downloadFile || _stickyState.downloadFile;
   _stickyState.downloadFile = dom.downloadFile;
 
@@ -445,6 +532,13 @@ const collect = () => {
   dom.hasUntrustedFormDest = dom.formDestinations.some(h => !_isTrustedHost(h));
 
   // ═══ SỐ LƯỢNG — đếm cho hiển thị badge ═══
+  const linkWarnings = aExt;
+  const scriptWarnings = extCount;
+  const imageWarnings = imgExt;
+  const iframeDanger = iframeRiskScore >= 40 ? 1 : 0;
+  const iframeWarning = iframeRiskScore > 0 && iframeRiskScore < 40 ? 1 : 0;
+  const formDanger = hijackFound ? 1 : 0;
+  const formWarning = sensitiveFormCount;
   dom.counts = {
     hiddenIframes: hiddenIframeCount,
     totalIframes: iframes.length,
@@ -460,6 +554,14 @@ const collect = () => {
     scamContentHits: scamHits.length,
     jsRiskScore: maxConf,
     hiddenForms: hiddenFormFound ? 1 : 0,
+    suspiciousLinks: dom.suspiciousLinkCount || 0,
+    deceptiveLinks: dom.deceptiveLinkCount || 0,
+    permissionRequests: dom.permissionRequests ? dom.permissionRequests.length : 0,
+    links: { total: aTotal, safe: Math.max(0, aTotal - linkWarnings), warning: linkWarnings, dangerous: 0 },
+    scripts: { total: totalCount, safe: Math.max(0, totalCount - scriptWarnings), warning: scriptWarnings, dangerous: 0 },
+    images: { total: imgTotal, safe: Math.max(0, imgTotal - imageWarnings), warning: imageWarnings, dangerous: 0 },
+    iframes: { total: iframes.length, safe: Math.max(0, iframes.length - iframeWarning - iframeDanger), warning: iframeWarning, dangerous: iframeDanger },
+    forms: { total: forms.length, safe: Math.max(0, forms.length - formWarning - formDanger), warning: formWarning, dangerous: formDanger },
   };
 
   return { result, dom };
@@ -468,7 +570,20 @@ const collect = () => {
 // ═══════════════════════════════════════════════════════════════════════════
 // NETWORK MONITOR — inject MAIN-world hook
 // ═══════════════════════════════════════════════════════════════════════════
+const injectPageHooksResource = () => {
+  try {
+    if (document.getElementById('__antiscam_page_hooks')) return;
+    const s = document.createElement('script');
+    s.id = '__antiscam_page_hooks';
+    s.src = chrome.runtime.getURL('js/page_hooks.js');
+    s.async = false;
+    (document.documentElement || document.head || document).appendChild(s);
+    s.onload = () => { try { s.remove(); } catch (_) {} };
+  } catch (_) {}
+};
+
 const netState = { externalHosts: new Set(), uploadToExternal: false, externalPostHosts: new Set() };
+const permState = { requests: new Set() };
 
 // Lắng nghe CustomEvent từ MAIN-world script
 window.addEventListener('__antiscam_net', (e) => {
@@ -482,6 +597,9 @@ window.addEventListener('__antiscam_net', (e) => {
       }
     }
   } catch (_) {}
+});
+window.addEventListener('__antiscam_perm', (e) => {
+  try { if (e.detail && e.detail.name) { permState.requests.add(String(e.detail.name)); scheduleRescan(250); } } catch (_) {}
 });
 
 const injectNetworkHook = () => {
@@ -536,6 +654,66 @@ const injectNetworkHook = () => {
           return _beacon.apply(navigator, arguments);
         };
       }
+      // Permission/API abuse hooks
+      var sendPerm = function(name){ try { window.dispatchEvent(new CustomEvent('__antiscam_perm',{detail:{name:name}})); } catch(e){} };
+      try {
+        if (navigator.permissions && navigator.permissions.query) {
+          var _pq = navigator.permissions.query.bind(navigator.permissions);
+          navigator.permissions.query = function(desc){
+            try { if (desc && desc.name) sendPerm('permissions-' + desc.name); } catch(e){}
+            return _pq.apply(navigator.permissions, arguments);
+          };
+        }
+      } catch(e){}
+      try {
+        if (window.Notification && Notification.requestPermission) {
+          var _np = Notification.requestPermission.bind(Notification);
+          Notification.requestPermission = function(){ sendPerm('notification'); return _np.apply(Notification, arguments); };
+        }
+      } catch(e){}
+      try {
+        if (navigator.geolocation) {
+          ['getCurrentPosition','watchPosition'].forEach(function(k){
+            var orig = navigator.geolocation[k];
+            if (orig) navigator.geolocation[k] = function(){ sendPerm('geolocation'); return orig.apply(navigator.geolocation, arguments); };
+          });
+        }
+      } catch(e){}
+      try {
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+          var _gum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+          navigator.mediaDevices.getUserMedia = function(constraints){
+            var c = constraints || {}; sendPerm(c.video && c.audio ? 'camera-microphone' : (c.video ? 'camera' : (c.audio ? 'microphone' : 'media')));
+            return _gum.apply(navigator.mediaDevices, arguments);
+          };
+        }
+      } catch(e){}
+      try {
+        var _fs = Element && Element.prototype && Element.prototype.requestFullscreen;
+        if (_fs) Element.prototype.requestFullscreen = function(){ sendPerm('fullscreen'); return _fs.apply(this, arguments); };
+      } catch(e){}
+      try {
+        if (window.PaymentRequest) {
+          var OrigPR = window.PaymentRequest;
+          window.PaymentRequest = function(){ sendPerm('payment-request'); return Reflect.construct(OrigPR, arguments); };
+          window.PaymentRequest.prototype = OrigPR.prototype;
+        }
+      } catch(e){}
+      try {
+        if (navigator.requestMIDIAccess) {
+          var _midi = navigator.requestMIDIAccess.bind(navigator);
+          navigator.requestMIDIAccess = function(){ sendPerm('midi'); return _midi.apply(navigator, arguments); };
+        }
+      } catch(e){}
+      try {
+        ['DeviceMotionEvent','DeviceOrientationEvent'].forEach(function(n){
+          var C = window[n];
+          if (C && C.requestPermission) {
+            var orig = C.requestPermission.bind(C);
+            C.requestPermission = function(){ sendPerm('sensors'); return orig.apply(C, arguments); };
+          }
+        });
+      } catch(e){}
       // WebSocket
       var _WS = window.WebSocket;
       if (_WS) {
@@ -579,6 +757,7 @@ const _stickyState = {
   obfuscatedScript: false,
   suspiciousExternalScript: false,
   downloadFile: false,
+  permissionAbuse: false,
   networkUploadToExternal: false,
   sensitiveForm: false,
   formHijack: false,
@@ -615,7 +794,7 @@ const startMutationObserver = () => {
       for (const node of m.addedNodes) {
         if (node.nodeType !== 1) continue;
         const tag = node.tagName;
-        if (tag === 'IFRAME' || tag === 'FORM' || tag === 'SCRIPT') { relevant = true; break; }
+        if (tag === 'IFRAME' || tag === 'FORM' || tag === 'SCRIPT' || tag === 'A') { relevant = true; break; }
         if (tag === 'DIV' || tag === 'SECTION') {
           if (node.querySelector && node.querySelector('iframe,form,script,input')) { relevant = true; break; }
         }
@@ -637,7 +816,7 @@ const startUrlWatcher = () => {
       currentUrl = window.location.href;
       // URL đổi → reset toàn bộ sticky + gửi lại ANALYSIS_RESULT (fresh)
       sentInitial = false; lastSnapshot = '';
-      netState.externalHosts.clear(); netState.uploadToExternal = false; netState.externalPostHosts.clear();
+      netState.externalHosts.clear(); netState.uploadToExternal = false; netState.externalPostHosts.clear(); permState.requests.clear();
       Object.keys(_stickyState).forEach(k => { _stickyState[k] = false; });
       setTimeout(() => sendAnalysis(false), 400);
     }
@@ -647,6 +826,7 @@ const startUrlWatcher = () => {
 // ═══════════════════════════════════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════════════════════════════════
+injectPageHooksResource();
 injectNetworkHook();
 sendAnalysis(false);              // phân tích ban đầu
 startMutationObserver();

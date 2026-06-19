@@ -4,9 +4,12 @@
 <head>
   <meta charset="utf-8">
   <title>AntiScam</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Asap:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
   <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.1.3/css/bootstrap.min.css"
     integrity="sha384-MCw98/SFnGE8fJT3GXwEOngsV7Zt27NXFoaoApmYm81iuXoPkFOJwJ8ERdknLPMO" crossorigin="anonymous">
-  <link href="https://fonts.googleapis.com/css?family=Josefin+Sans|Russo+One" rel="stylesheet">
   <link href="plugin_ui.css" type="text/css" rel="stylesheet">
   <link href="commons.css" type="text/css" rel="stylesheet">
   <link href="percentage.css" type="text/css" rel="stylesheet">
@@ -14,7 +17,13 @@
 
 <body>
   <div id="plugin_main">
-    <button id="themeToggle" type="button" title="Đổi giao diện">Dark</button>
+    <label class="theme-switch" title="Đổi giao diện">
+      <input id="themeToggle" type="checkbox" aria-label="Đổi giao diện sáng/tối">
+      <span class="theme-slider" aria-hidden="true">
+        <i class="fa-solid fa-moon theme-icon theme-icon-dark"></i>
+        <i class="fa-solid fa-sun theme-icon theme-icon-light"></i>
+      </span>
+    </label>
     <h2 id="domain_url"></h2>
 
     <div id="pluginBody">

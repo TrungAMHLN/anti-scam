@@ -54,6 +54,13 @@ try {
 
   document.title = `${document.title} ${message.title}`;
 
+  if (message.riskBlock) {
+    const header = document.getElementById('header');
+    if (header) header.textContent = `Trang ${message.title} có nguy cơ nguy hiểm cao`;
+    const intro = document.querySelector('#header + p');
+    if (intro) intro.textContent = message.reason || 'AntiScam phát hiện nhiều tín hiệu nguy hiểm trên trang này.';
+  }
+
   if (message.lenient) {
     document.getElementById('access').style.display = 'inline-block';
     document.getElementById('access').addEventListener('click', () => {

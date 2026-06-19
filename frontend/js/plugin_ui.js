@@ -12,22 +12,30 @@ let currentTabUrl = '';
 let currentDomain = '';
 
 const initTheme = () => {
-  const saved = localStorage.getItem('antiscam-theme') || 'auto';
-  if (saved === 'light') document.documentElement.setAttribute('data-theme', 'light');
-  if (saved === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
+  const stored = localStorage.getItem('antiscam-theme');
+  const saved = (stored === 'light' || stored === 'dark') ? stored : 'dark';
+  document.documentElement.setAttribute('data-theme', saved);
+  localStorage.setItem('antiscam-theme', saved);
   const btn = document.getElementById('themeToggle');
-  if (btn) btn.textContent = (saved === 'light') ? 'Light' : 'Dark';
+  if (btn) {
+    btn.checked = saved === 'light';
+    btn.setAttribute('aria-label', saved === 'light' ? 'Đang dùng giao diện sáng' : 'Đang dùng giao diện tối');
+  }
 };
-const toggleTheme = () => {
-  const cur = document.documentElement.getAttribute('data-theme') || 'dark';
-  const next = cur === 'dark' ? 'light' : 'dark';
+const toggleTheme = (event) => {
+  const checked = event && event.target ? !!event.target.checked : (document.documentElement.getAttribute('data-theme') !== 'light');
+  const next = checked ? 'light' : 'dark';
   document.documentElement.setAttribute('data-theme', next);
   localStorage.setItem('antiscam-theme', next);
-  const btn = document.getElementById('themeToggle'); if (btn) btn.textContent = next === 'light' ? 'Light' : 'Dark';
+  const btn = document.getElementById('themeToggle');
+  if (btn) {
+    btn.checked = next === 'light';
+    btn.setAttribute('aria-label', next === 'light' ? 'Đang dùng giao diện sáng' : 'Đang dùng giao diện tối');
+  }
 };
 initTheme();
 const themeBtn = document.getElementById('themeToggle');
-if (themeBtn) themeBtn.addEventListener('click', toggleTheme);
+if (themeBtn) themeBtn.addEventListener('change', toggleTheme);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Cấu hình polling — V2: liên tục (dynamic score)
@@ -57,7 +65,7 @@ const featureTranslations = {
   '@ Symbol':'Chứa ký tự @','Redirecting using //':'Chuyển hướng ẩn (//)',
   '(-) Prefix/Suffix in domain':'Có dấu (-) trong tên miền','No. of Sub Domains':'Nhiều tên miền phụ',
   'HTTPS':'Bảo mật HTTPS','Favicon':'Biểu tượng trang (Favicon)','Port':'Cổng mạng (Port)',
-  "HTTPS in URL's domain part":'HTTPS giả mạo','Request URL':'Tài nguyên từ trang khác',
+  "HTTPS in URL's domain part":'Tên miền chứa chữ HTTPS','Request URL':'Tài nguyên từ trang khác',
   'Anchor':'Liên kết ngoài','Script & Link':'Mã nhúng từ trang khác','SFH':'Biểu mẫu không rõ nơi nhận dữ liệu',
   'mailto':'Gửi dữ liệu qua email','iFrames':'Khung trang ẩn (iFrame)',
   'Sensitive Form':'Yêu cầu nhập mật khẩu/OTP/tài khoản/thẻ','Form Hijacking':'Chiếm đoạt dữ liệu Form',
@@ -68,10 +76,12 @@ const featureTranslations = {
   'BrandInDomain':'Tên miền chứa tên thương hiệu lạ','BrandInPath':'Đường dẫn nhắc thương hiệu',
   'BrandImpersonation':'Giả mạo thương hiệu trong nội dung','VNScamKeyword':'URL chứa từ khoá lừa đảo (VN)',
   'Keylogger':'Theo dõi thao tác gõ phím','ClipboardHijack':'Can thiệp bộ nhớ tạm',
-  'DangerousDownload':'Yêu cầu tải file nguy hiểm','SuspiciousExternal':'Tải mã từ nguồn lạ',
+  'DangerousDownload':'Yêu cầu tải file nguy hiểm','ArchiveDownload':'Tải file nén','SuspiciousExternal':'Tải mã từ nguồn lạ',
   'NoHTTPS':'Không dùng HTTPS','AtSymbol':'URL chứa ký tự @','LongURL':'Đường dẫn quá dài',
   'SuspiciousTLD':'Đuôi tên miền dễ lạm dụng','IPHost':'Truy cập bằng địa chỉ IP',
-  'RedirectChain':'Chuỗi chuyển hướng phức tạp',
+  'RedirectChain':'Chuỗi chuyển hướng phức tạp','OpenRedirect':'Open redirect','RedirectBadHop':'Chuyển hướng qua URL nguy hiểm',
+  'SuspiciousLinks':'Liên kết nguy hiểm trên trang','DeceptiveLinks':'Liên kết giả nhãn',
+  'PermissionAbuse':'Yêu cầu quyền nhạy cảm','MetaRefreshRedirect':'Meta refresh chuyển hướng','ScriptRedirect':'JavaScript chuyển hướng',
   'DataExfil':'Gửi dữ liệu ra tên miền lạ',
   'FormDest':'Biểu mẫu gửi dữ liệu đến tên miền lạ',
   'Hidden Form':'Biểu mẫu bị ẩn', 'HiddenForm':'Biểu mẫu bị ẩn',
@@ -83,7 +93,6 @@ const featureTranslations = {
   'EstablishedDomain':'Tên miền lâu đời','ReputationVerified':'Nằm trong danh sách tin cậy',
   'OfficialBrand':'Thương hiệu chính thức','SSL':'Có chứng chỉ HTTPS',
   'TrustedResources':'Tài nguyên từ nguồn phổ biến',
-  'CleanScan':'Quét toàn diện: không phát hiện mối đe dọa',
   'NoPhishingForm':'Không phát hiện biểu mẫu đánh cắp thông tin',
 };
 
@@ -108,6 +117,16 @@ const _cleanDyn = () => {
 // - TỶ LỆ (anchor, script, image): 2/12
 // ĐỒNG NHẤT: luôn dùng cú pháp [số] trong tag riêng (badge-count)
 // ─────────────────────────────────────────────────────────────────────────────
+const _formatObjectStats = (stats) => {
+  if (!stats || typeof stats !== 'object') return null;
+  const total = Number(stats.total || 0);
+  const safe = Number(stats.safe || 0);
+  const warning = Number(stats.warning || 0);
+  const dangerous = Number(stats.dangerous || 0);
+  if (total <= 0) return null;
+  return `✓${safe} ⚠${warning} ✕${dangerous} / ${total}`;
+};
+
 const _countData = (key, counts) => {
   if (!counts) return null;
   switch (key) {
@@ -115,16 +134,18 @@ const _countData = (key, counts) => {
       if (counts.hiddenIframes > 0) return { text: counts.hiddenIframes > 1 ? '×' + counts.hiddenIframes : '1' };
       break;
     case 'Anchor':
-      if (counts.externalAnchors > 0) return { text: counts.externalAnchors + '/' + counts.totalAnchors };
-      break;
     case 'Script & Link':
-      if (counts.externalScripts > 0) return { text: counts.externalScripts + '/' + counts.totalScripts };
-      break;
     case 'Request URL':
-      if (counts.externalImages > 0) return { text: counts.externalImages + '/' + counts.totalImages };
-      break;
     case 'Sensitive Form':
-      if (counts.sensitiveForms > 1) return { text: '×' + counts.sensitiveForms };
+      return null;
+    case 'SuspiciousLinks':
+      if (counts.suspiciousLinks > 0) return { text: '×' + counts.suspiciousLinks };
+      break;
+    case 'DeceptiveLinks':
+      if (counts.deceptiveLinks > 0) return { text: '×' + counts.deceptiveLinks };
+      break;
+    case 'PermissionAbuse':
+      if (counts.permissionRequests > 0) return { text: '×' + counts.permissionRequests };
       break;
   }
   return null;
@@ -159,7 +180,9 @@ const semanticKeyMap = {
   'Obfuscated Script':'js-risk', 'JavaScript Risk':'js-risk', 'JavaScriptRisk':'js-risk',
   'Scam Content':'scam-content', 'ScamContent':'scam-content',
   'MalwareReputation':'malware-reputation', 'DNSRisk':'dns-risk', 'CommunityReport':'community-report',
-  'DangerousDownload':'download-risk'
+  'DangerousDownload':'download-risk', 'ArchiveDownload':'download-risk', 'SuspiciousLinks':'link-risk', 'DeceptiveLinks':'link-risk',
+  'PermissionAbuse':'permission-risk', 'OpenRedirect':'redirect-risk', 'RedirectBadHop':'redirect-risk',
+  'MetaRefreshRedirect':'redirect-risk', 'ScriptRedirect':'redirect-risk'
 };
 
 const _canonicalKey = (key, text) => semanticKeyMap[key] || _normLabel(featureTranslations[key] || text || key);
@@ -172,16 +195,17 @@ const _labelForSignal = (key, val, fallbackText) => {
   const level = (typeof val === 'string' && levelWords.includes(val)) ? val : (typeof val === 'string' ? _levelFromValue(val) : (val || 'warning'));
   const safe = level === 'safe';
   switch (key) {
-    case 'HTTPS': case 'SSL': return safe ? 'HTTPS hợp lệ' : 'Không dùng HTTPS';
+    case 'HTTPS': case 'SSL': return safe ? 'Kết nối HTTPS hợp lệ' : 'Không dùng HTTPS';
     case 'NoHTTPS': return 'Không dùng HTTPS';
+    case "HTTPS in URL's domain part": return safe ? 'Tên miền không mượn chữ HTTPS' : 'Tên miền mượn chữ HTTPS';
     case 'OfficialBrand': return 'Domain chính thức';
     case 'EstablishedDomain': return 'Domain lâu năm';
     case 'NewDomain': case 'Domain Age': return 'Website mới đăng ký';
     case 'TrustedResources': return 'CDN uy tín';
     case 'Favicon': return safe ? 'Favicon hợp lệ' : 'Favicon bất thường';
-    case 'Anchor': return safe ? 'Liên kết ngoài hợp lệ' : 'Liên kết ngoài đáng chú ý';
-    case 'Request URL': return safe ? 'Tài nguyên ảnh hợp lệ' : 'Tài nguyên ảnh từ nguồn lạ';
-    case 'Script & Link': return safe ? 'Mã nhúng hợp lệ' : 'Mã nhúng từ nguồn lạ';
+    case 'Anchor': return 'Tổng liên kết đã kiểm tra';
+    case 'Request URL': return 'Tổng ảnh/tài nguyên ảnh';
+    case 'Script & Link': return 'Tổng script/link nhúng';
     case 'Sensitive Form': return safe ? 'Không phát hiện form đánh cắp' : 'Yêu cầu thông tin nhạy cảm';
     case 'NoPhishingForm': return 'Không phát hiện form đánh cắp';
     case 'Form Hijacking': case 'FormDest': return 'Form gửi sang domain lạ';
@@ -194,6 +218,14 @@ const _labelForSignal = (key, val, fallbackText) => {
     case 'DNSRisk': return 'Hạ tầng DNS rủi ro';
     case 'CommunityReport': return 'Cộng đồng đã báo cáo';
     case 'DangerousDownload': return 'Tải xuống nguy hiểm';
+    case 'ArchiveDownload': return 'Tải file nén';
+    case 'SuspiciousLinks': return 'Liên kết nguy hiểm trên trang';
+    case 'DeceptiveLinks': return 'Liên kết giả nhãn';
+    case 'PermissionAbuse': return 'Yêu cầu quyền nhạy cảm';
+    case 'OpenRedirect': return 'Open redirect đáng ngờ';
+    case 'RedirectBadHop': return 'Chuyển hướng qua URL nguy hiểm';
+    case 'MetaRefreshRedirect': return 'Meta refresh chuyển hướng';
+    case 'ScriptRedirect': return 'JavaScript chuyển hướng';
     case 'Tiny URL': return safe ? 'URL không rút gọn' : 'URL rút gọn';
     case 'IP Address': case 'IPHost': return safe ? 'Không dùng IP trực tiếp' : 'Dùng địa chỉ IP trực tiếp';
     case 'LongURL': case 'URL Length': return safe ? 'Độ dài URL hợp lệ' : 'URL quá dài';
@@ -213,7 +245,7 @@ const _createChip = (item, counts) => {
   label.textContent = item.label;
   li.appendChild(icon);
   li.appendChild(label);
-  const cd = _countData(item.key, counts);
+  const cd = item.count ? { text: item.count } : _countData(item.key, counts);
   if (cd) {
     const count = document.createElement('span');
     count.className = 'chip-count';
@@ -243,21 +275,45 @@ const _collectFeatureChips = (state) => {
     const canonical = _canonicalKey(key, label);
     const group = _groupFromLevel(level);
     const priority = { danger:0, suspicious:1, warning:2, safe:3 }[level] ?? 4;
-    const chip = { key, label, level, group, priority, canonical };
+    const chip = { key, label, level, group, priority, canonical, count: raw.count || null };
     const previous = used.get(canonical);
     if (!previous || chip.priority < previous.priority) used.set(canonical, chip);
   };
 
   const explanations = Array.isArray(state.explanations) ? state.explanations : [];
-  explanations.forEach(item => addChip({ key:item.key, level:item.level, text:item.text }));
+  explanations
+    .filter(item => item && item.key !== 'CleanScan')
+    .forEach(item => addChip({ key:item.key, level:item.level, text:item.text }));
 
   const result = state.result || {};
   Object.keys(result).forEach(key => {
-    if (key === 'tab') return;
+    if (key === 'tab' || key === 'CleanScan') return;
+    // Các key tổng hợp này được tách thành chip an toàn / chưa xác minh / nguy hiểm bên dưới.
+    if (['Anchor', 'Script & Link', 'Request URL'].includes(key) && counts) return;
     const value = String(result[key]);
     if (!['-1', '0', '1', '2'].includes(value)) return;
     addChip({ key, value, label:featureTranslations[key] || key });
   });
+
+  const addStatChips = () => {
+    if (!counts) return;
+    const specs = [
+      ['links', 'Liên kết'],
+      ['scripts', 'Script/link nhúng'],
+      ['images', 'Ảnh/tài nguyên ảnh'],
+      ['iframes', 'iFrame'],
+      ['forms', 'Biểu mẫu'],
+    ];
+    specs.forEach(([key, name]) => {
+      const st = counts[key];
+      if (!st || !st.total) return;
+      const safe = Number(st.safe || 0), warning = Number(st.warning || 0), dangerous = Number(st.dangerous || 0);
+      if (safe > 0) addChip({ key: `${key}Safe`, level: 'safe', label: `${name} an toàn`, count: '×' + safe });
+      if (warning > 0) addChip({ key: `${key}Warning`, level: 'warning', label: `${name} chưa xác minh`, count: '×' + warning });
+      if (dangerous > 0) addChip({ key: `${key}Danger`, level: 'danger', label: `${name} nguy hiểm`, count: '×' + dangerous });
+    });
+  };
+  addStatChips();
 
   used.forEach(v => chips.push(v));
   const order = { positive:0, warning:1, danger:2 };
@@ -269,7 +325,7 @@ const _collectFeatureChips = (state) => {
 // Render unified feature chips
 // ─────────────────────────────────────────────────────────────────────────────
 const renderState = (state, domain) => {
-  const { isWhiteList, isBlocked, isPhish, legitimatePercent, status, isUnknown } = state;
+  const { isWhiteList, isBlocked, isPhish, legitimatePercent, confidence, status, isUnknown } = state;
 
   if (isWhiteList) {
     $('#pluginBody').hide(); $('#isSafe').show(); $('#isSafe .site-url').text(domain); return;
@@ -301,7 +357,9 @@ const renderState = (state, domain) => {
   if (featureContent && featureContent.style.maxHeight) featureContent.style.maxHeight = `${featureContent.scrollHeight}px`;
 
   const pct = parseInt(legitimatePercent);
+  const confidencePct = parseInt(confidence);
   const isValidPct = !isNaN(pct) && isFinite(pct);
+  const isValidConfidence = !isNaN(confidencePct) && isFinite(confidencePct);
 
   const site_score = document.getElementById('site_score');
   const pct_content = document.getElementById('percentage_content');
@@ -325,16 +383,17 @@ const renderState = (state, domain) => {
   if (status === 'OFFLINE') message = 'Không thể kết nối máy chủ phân tích.';
   else if (status === 'FAILED') message = 'Không thể phân tích trang này.';
   else if (isUnknown) message = 'Chưa đủ dữ liệu để đánh giá độ tin cậy.';
-  else message = isPhish ? 'Website có nguy cơ cao. Xem các tín hiệu bên dưới.' : 'Website đã được phân tích. Xem các tín hiệu bên dưới.';
+  else message = isPhish ? 'Website có nguy cơ cao.' : 'Website đã được phân tích.';
 
   // Vòng tròn chỉ hiển thị % gọn gàng — KHÔNG nhồi confidence vào
   $('#site_score').text(isValidPct ? `${pct}%` : '...');
 
   if (isValidPct) {
-    const noteLine = isUnknown
+    const accuracyLine = `<div class="sub-note accuracy-note">Độ tin cậy: ${isValidConfidence ? confidencePct : 0}%</div>`;
+    const unknownLine = isUnknown
       ? `<div class="sub-note">Chưa đủ dữ liệu — không nhập thông tin nhạy cảm nếu chưa chắc chắn.</div>`
-      : `<div class="sub-note">Mỗi lý do bên dưới là một tín hiệu đánh giá độc lập.</div>`;
-    $('#site_msg').html(message + noteLine);
+      : '';
+    $('#site_msg').html(message + accuracyLine + unknownLine);
   } else {
     $('#site_msg').text('...');
   }

@@ -1,14 +1,14 @@
 :root {
  font-size: 62.5%;
- font-family: 'Russo One', 'Josefin Sans', sans-serif;
+ font-family: "Asap", Arial, Helvetica, sans-serif;
 }
 
 body {
  padding: 0px;
  margin: 0px;
- background: #111827;
+ background: var(--dark-bg, #010409);
  width: 540px;
- color: #e2e8f0;
+ color: var(--text-main, #e5e7eb);
 }
 
 h1,
@@ -31,11 +31,20 @@ h6 {
  color: #0b1121;
  font-size: 1.6rem;
  border-radius: 2rem;
- background-color: #00f3ff;
+ background-color: var(--neon-blue, #60a5fa);
  width: 15rem;
  padding: 0.5rem 2rem;
- box-shadow: 0 0 15px rgba(0, 243, 255, 0.4);
- font-weight: bold;
+ box-shadow: none;
+ font-weight: 600;
  border: none;
  cursor: pointer;
 }
+
+
+body, button, input, textarea, select {
+ font-family: "Asap", Arial, Helvetica, sans-serif !important;
+}
+button, button:focus, button:active, .navigation-button:focus, .navigation-button:active {
+ outline: none !important;
+}
+button { font-weight: 600 !important; }

@@ -19,10 +19,14 @@ const logger = {
 const ANALYSIS_STATUS = Object.freeze({ IDLE:'IDLE', ANALYZING:'ANALYZING', SUCCESS:'SUCCESS', FAILED:'FAILED', OFFLINE:'OFFLINE' });
 const BLACKLIST_TTL_MS = 60*60*1000, OPENPHISH_TTL_MS = 15*60*1000, CLASSIFIER_TTL_MS = 5*60*1000;
 const RESULT_CACHE_TTL_MS = 10*60*1000, INTEL_CACHE_TTL_MS = 30*60*1000, FETCH_TIMEOUT_MS = 10_000, MAX_RETRIES = 3;
+const RESULT_CACHE_SCHEMA = 2;
 const API_BASE = 'https://api.chongluadao.vn';
 const BACKEND_BASE = API_BASE;
 const OPENPHISH_URL = 'https://raw.githubusercontent.com/openphish/public_feed/refs/heads/main/feed.txt';
 const PORT_REDIRECT = 'REDIRECT_PORT_NAME', PORT_CLOSE_TAB = 'CLOSE_TAB_PORT_NAME';
+const RISK_BLOCK_THRESHOLD = 55;
+const RISK_BLOCK_ALLOW_MS = 5 * 60 * 1000;
+const riskBlockAllowUntil = new Map(); // tabId -> timestamp
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Circuit Breaker
@@ -61,14 +65,14 @@ const getUrlCache = async (url) => {
   try {
     let h=0; for (let i=0;i<url.length;i++){ h=((h<<5)-h)+url.charCodeAt(i); h|=0; }
     const d = await chrome.storage.session.get(`cache_${h}`);
-    const it = d[`cache_${h}`]; if (it && Date.now()-it.timestamp < RESULT_CACHE_TTL_MS) return it;
+    const it = d[`cache_${h}`]; if (it && it.schemaVersion === RESULT_CACHE_SCHEMA && Date.now()-it.timestamp < RESULT_CACHE_TTL_MS) return it;
   } catch(e){}
   return null;
 };
 const setUrlCache = async (url, data) => {
   try {
     let h=0; for (let i=0;i<url.length;i++){ h=((h<<5)-h)+url.charCodeAt(i); h|=0; }
-    await chrome.storage.session.set({ [`cache_${h}`]: { ...data, timestamp: Date.now() } });
+    await chrome.storage.session.set({ [`cache_${h}`]: { ...data, schemaVersion: RESULT_CACHE_SCHEMA, timestamp: Date.now() } });
   } catch(e){}
 };
 
@@ -206,6 +210,79 @@ const getRedirectChain = (tabId) => redirectChains.get(tabId) || [];
 // ═══════════════════════════════════════════════════════════════════════════
 // REPUTATION ENGINE  (Vấn đề 11)
 // ═══════════════════════════════════════════════════════════════════════════
+
+const _isKnownBadUrl = (urlString) => {
+  if (!urlString) return false;
+  const cur = createUrlObject(String(urlString));
+  const normalized = String(urlString).replace(/\/$/, '');
+  if (blackListingSet.has(normalized) || blackListingSet.has(String(urlString))) return true;
+  if (!cur || !blackListing || !blackListing.length) return false;
+  const curHost = cur.hostname.replace(/^www\./, '').toLowerCase();
+  const curHref = cur.href.replace(/\/$/, '');
+  let curReg = curHost;
+  try { curReg = getRegistrable(curHost); } catch (_) {}
+  for (const raw of blackListing) {
+    const item = String(raw || '').trim();
+    if (!item) continue;
+    const bs = createUrlObject(item);
+    if (!bs) {
+      const plain = item.replace(/^\*\./, '').replace(/\/$/, '').toLowerCase();
+      if (plain && (curHost === plain || curReg === plain || curHost.endsWith('.' + plain))) return true;
+      continue;
+    }
+    const bHost = bs.hostname.replace(/^www\./, '').toLowerCase();
+    const bHref = bs.href.replace(/\/$/, '');
+    if (curHref === bHref) return true;
+    if (bs.pathname === '/' || bs.pathname === '/*') {
+      if (curHost === bHost || curHost.endsWith('.' + bHost)) return true;
+    }
+  }
+  return false;
+};
+const _analyzePageLinks = async (links, pageDomain) => {
+  const out = [];
+  const seen = new Set();
+  if (!Array.isArray(links)) return out;
+  for (const raw of links.slice(0, 160)) {
+    if (!raw || seen.has(raw)) continue;
+    seen.add(raw);
+    let host = '';
+    try { host = new URL(raw).hostname; } catch (_) {}
+    const knownBad = _isKnownBadUrl(raw);
+    let linkReg = '';
+    try { linkReg = getRegistrable(host); } catch (_) {}
+    const pageReg = getRegistrable(pageDomain || '');
+    const benignHost = host && (linkReg === pageReg || (typeof isTrustedHost !== 'undefined' && isTrustedHost(host)) || (typeof REPUTATION_WHITELIST !== 'undefined' && REPUTATION_WHITELIST.has(linkReg)) || (typeof isOfficialBrandDomain !== 'undefined' && !!isOfficialBrandDomain(host)));
+    const local = (!knownBad && benignHost) ? { findings: [] } : (typeof analyzeUrl !== 'undefined' ? analyzeUrl(raw) : { findings: [] });
+    const suspicious = (local.findings || []).filter(f =>
+      ['DangerousDownload','Typosquat','Homograph','BrandInDomain','BrandInPath','Punycode','UnicodeHost','VNScamKeyword','IPHost','OpenRedirect'].includes(f.key)
+    );
+    let keys = suspicious.map(f => f.key).slice(0, 5);
+    let points = (knownBad ? 45 : 0) + suspicious.reduce((sum, f) => sum + Math.min(f.points || 0, 18), 0);
+    const strongLinkSignal = suspicious.some(f => ['DangerousDownload','Typosquat','Homograph','BrandInDomain','BrandInPath','OpenRedirect'].includes(f.key));
+    if (!knownBad && strongLinkSignal && host && !benignHost && out.length < 3) {
+      try {
+        const age = await fetchDomainAge(host);
+        if (age && age.ageDays >= 0 && age.ageDays < 14) { keys.push('LinkNewDomain'); points += 10; }
+      } catch (_) {}
+    }
+    if (knownBad || keys.length) {
+      out.push({ url: raw, host, knownBad, keys: keys.slice(0, 6), points });
+    }
+    if (out.length >= 12) break;
+  }
+  return out;
+};
+
+const _analyzeRedirectHopRisk = (chain) => {
+  if (!Array.isArray(chain)) return { bad: false, badHops: [] };
+  const badHops = [];
+  for (const u of chain) {
+    if (_isKnownBadUrl(u)) badHops.push(u);
+  }
+  return { bad: badHops.length > 0, badHops: badHops.slice(0, 6) };
+};
+
 const resolveReputation = (domain, registrable, urlString, backendIntel = null) => {
   const inBuiltWhitelist = typeof REPUTATION_WHITELIST !== 'undefined' && REPUTATION_WHITELIST.has(registrable);
   // CLD whitelist (tải từ API)
@@ -249,6 +326,21 @@ const updateBadge = (isPhishing, finalScore, tabId) => {
   chrome.action.setTitle({ title, tabId }).catch(()=>{});
   chrome.action.setIcon({ path: 'assets/antiScamLogo.png', tabId }).catch(()=>{});
 };
+const isRiskBlockAllowed = (tabId) => {
+  const until = riskBlockAllowUntil.get(tabId) || 0;
+  if (Date.now() < until) return true;
+  riskBlockAllowUntil.delete(tabId);
+  return false;
+};
+const shouldAutoBlock = (assessment, reputation) => {
+  if (!assessment || !reputation) return false;
+  if (reputation.inWhitelist || reputation.isOfficialBrand) return false;
+  const risk = assessment.riskScore || 0;
+  const conf = assessment.confidence || 0;
+  const finalScore = assessment.finalScore || 0;
+  return conf >= 45 && (risk >= RISK_BLOCK_THRESHOLD || (finalScore <= 30 && risk >= 35));
+};
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CLASSIFICATION  —  ENGINE V2 (Trust / Risk / Confidence)
@@ -273,8 +365,13 @@ const classify = async (tabId, featuresResult, urlString, domInput = {}, isUpdat
       if (cached) {
         await setTabState(tabId, { status: ANALYSIS_STATUS.SUCCESS, isPhish: cached.isPhish,
           legitimatePercent: cached.legitimatePercent, confidence: cached.confidence,
+          riskScore: cached.riskScore || 0, trustScore: cached.trustScore || 0, trustContext: cached.trustContext || null,
           result: cached.result || {}, summary: cached.summary || '', explanations: cached.explanations || [], isUnknown: cached.isUnknown, url: urlString });
-        updateBadge(cached.isPhish, cached.legitimatePercent, tabId); return;
+        updateBadge(cached.isPhish, cached.legitimatePercent, tabId);
+        if (!isRiskBlockAllowed(tabId) && cached.riskScore >= RISK_BLOCK_THRESHOLD && cached.confidence >= 45) {
+          blockingFunction(urlString, `Mức rủi ro ${cached.riskScore}/100`, tabId, { summary: cached.summary || 'Trang có nhiều tín hiệu nguy hiểm.' });
+        }
+        return;
       }
     }
 
@@ -293,8 +390,19 @@ const classify = async (tabId, featuresResult, urlString, domInput = {}, isUpdat
     const stabilityMs = Date.now() - analysisStart;
 
     // 5. computeScore (engine chính)
+    const enrichedDom = { ...(domInput || {}) };
+    const suspiciousLinks = await _analyzePageLinks(enrichedDom.pageLinks || [], domain);
+    if (suspiciousLinks.length) {
+      enrichedDom.suspiciousLinks = suspiciousLinks;
+      enrichedDom.suspiciousLinkCount = suspiciousLinks.length;
+    }
+    const redirectHopRisk = _analyzeRedirectHopRisk(redirectChain);
+    if (redirectHopRisk.bad) {
+      enrichedDom.redirectBadHop = true;
+      enrichedDom.redirectBadHops = redirectHopRisk.badHops;
+    }
     const assessment = computeScore(urlString, {
-      dom: domInput || {},
+      dom: enrichedDom,
       domainAgeDays,
       domainAge,
       reputation,
@@ -338,6 +446,7 @@ const classify = async (tabId, featuresResult, urlString, domInput = {}, isUpdat
       confidence,
       trustScore: assessment.trustScore,
       riskScore,
+      trustContext: assessment.trustContext,
       isUnknown: assessment.isUnknown,
       result: mergedResult,
       summary: assessment.summary,
@@ -345,20 +454,33 @@ const classify = async (tabId, featuresResult, urlString, domInput = {}, isUpdat
       domainAge: assessment.domainAge || domainAge,
       reputation,
       redirectHops: assessment.redirectHops,
-      counts: (domInput && domInput.counts) ? domInput.counts : null,
+      counts: (() => {
+        if (!enrichedDom || !enrichedDom.counts) return null;
+        const counts = { ...enrichedDom.counts, suspiciousLinks: enrichedDom.suspiciousLinkCount || 0, deceptiveLinks: enrichedDom.deceptiveLinkCount || 0, permissionRequests: enrichedDom.permissionRequests ? enrichedDom.permissionRequests.length : 0 };
+        if (counts.links) {
+          counts.links = { ...counts.links };
+          counts.links.dangerous = enrichedDom.suspiciousLinkCount || 0;
+          counts.links.warning = Math.max(0, (counts.links.warning || 0) - counts.links.dangerous);
+          counts.links.safe = Math.max(0, (counts.links.total || 0) - counts.links.warning - counts.links.dangerous);
+        }
+        return counts;
+      })(),
       analysisStart,
       url: urlString,
     });
 
     // 10. Cache (chỉ lần đầu)
     if (!isUpdate) {
-      await setUrlCache(urlString, { isPhish, legitimatePercent: finalScore, confidence, result: mergedResult, summary: assessment.summary, explanations: assessment.explanations || [], isUnknown: assessment.isUnknown });
+      await setUrlCache(urlString, { isPhish, legitimatePercent: finalScore, confidence, riskScore, trustScore: assessment.trustScore, trustContext: assessment.trustContext, result: mergedResult, summary: assessment.summary, explanations: assessment.explanations || [], isUnknown: assessment.isUnknown });
     }
 
     updateBadge(isPhish, finalScore, tabId);
+    if (!isRiskBlockAllowed(tabId) && shouldAutoBlock(assessment, reputation)) {
+      blockingFunction(urlString, `Mức rủi ro ${riskScore}/100`, tabId, { summary: assessment.summary || 'Trang có nhiều tín hiệu nguy hiểm.' });
+    }
   } catch (err) {
     logger.error(`classify ${tabId}:`, err);
-    await setTabState(tabId, { status: ANALYSIS_STATUS.FAILED, isPhish: false, legitimatePercent: 0,
+    await setTabState(tabId, { status: ANALYSIS_STATUS.FAILED, isPhish: false, legitimatePercent: null, confidence: 0,
       result: featuresResult || {}, summary: 'Không thể phân tích trang này.', url: urlString });
   }
 };
@@ -366,11 +488,11 @@ const classify = async (tabId, featuresResult, urlString, domInput = {}, isUpdat
 // ─────────────────────────────────────────────────────────────────────────────
 // Blocking & SafeCheck
 // ─────────────────────────────────────────────────────────────────────────────
-const blockingFunction = (url, blackSite, tabId) => {
-  const message = { site: url, match: blackSite, title: url, lenient: inputBlockLenient,
-    favicon: `https://www.google.com/s2/favicons?domain=${url}` };
+const blockingFunction = (url, blackSite, tabId, opts = {}) => {
+  const message = { site: url, match: blackSite, title: url, lenient: inputBlockLenient, riskBlock: !!opts.summary,
+    reason: opts.summary || '', favicon: `https://www.google.com/s2/favicons?domain=${url}` };
   setTabState(tabId, { status: ANALYSIS_STATUS.SUCCESS, isBlocked: url, isPhish: true,
-    legitimatePercent: 0, confidence: 95, result: {}, summary: 'Trang này nằm trong danh sách đen đã xác nhận.', url }).catch(()=>{});
+    legitimatePercent: 0, confidence: 95, result: {}, summary: opts.summary || 'Trang này nằm trong danh sách đen đã xác nhận.', url }).catch(()=>{});
   chrome.tabs.update(tabId, { url: `${chrome.runtime.getURL('blocking.html')}#${JSON.stringify(message)}` }).catch(e=>logger.error('blocking', e));
 };
 
@@ -401,7 +523,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const isUpdate = request.type === 'ANALYSIS_UPDATE';
 
     if (!isUpdate) {
-      setTabState(tabId, { status: ANALYSIS_STATUS.ANALYZING, result: request.result, url: tabUrl, isPhish: false, legitimatePercent: 0 })
+      setTabState(tabId, { status: ANALYSIS_STATUS.ANALYZING, result: request.result, url: tabUrl, isPhish: false, legitimatePercent: null })
         .then(() => classify(tabId, request.result, tabUrl, request.dom, false))
         .then(() => sendResponse({ ok:true }))
         .catch(err => { logger.error('ANALYSIS_RESULT', err); sendResponse({ ok:false }); });
@@ -420,7 +542,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
   if (request.type === 'SET_WHITELIST_TEMP') {
     const tabId = request.tabId; if (!tabId) { sendResponse({ ok:false }); return true; }
-    setTabState(tabId, { status: ANALYSIS_STATUS.IDLE, isWhiteList:null, isBlocked:null, url:null })
+    Promise.resolve(riskBlockAllowUntil.set(tabId, Date.now() + RISK_BLOCK_ALLOW_MS))
+      .then(() => setTabState(tabId, { status: ANALYSIS_STATUS.IDLE, isWhiteList:null, isBlocked:null, url:null }))
       .then(()=>sendResponse({ok:true})).catch(()=>sendResponse({ok:false})); return true;
   }
   if (request.type === 'COMMUNITY_REPORT') {
@@ -447,19 +570,19 @@ chrome.webRequest.onBeforeRequest.addListener((details) => {
 }, { urls: ['*://*/*'], types: ['main_frame'] });
 
 chrome.webRequest.onBeforeRedirect.addListener((details) => {
-  if ((details.type === 'main_frame' || details.type === 'sub_frame') && details.tabId >= 0 && details.redirectUrl) {
+  if (details.type === 'main_frame' && details.tabId >= 0 && details.redirectUrl) {
     const chain = redirectChains.get(details.tabId) || [];
     if (!chain.includes(details.redirectUrl)) chain.push(details.redirectUrl);
     redirectChains.set(details.tabId, chain);
   }
-}, { urls: ['*://*/*'], types: ['main_frame', 'sub_frame'] });
+}, { urls: ['*://*/*'], types: ['main_frame'] });
 
-chrome.tabs.onRemoved.addListener((tabId) => { removeTabState(tabId); redirectChains.delete(tabId); });
+chrome.tabs.onRemoved.addListener((tabId) => { removeTabState(tabId); redirectChains.delete(tabId); riskBlockAllowUntil.delete(tabId); });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === 'loading' && changeInfo.url) {
     redirectChains.set(tabId, [changeInfo.url]);
-    setTabState(tabId, { status: ANALYSIS_STATUS.ANALYZING, result: null, url: changeInfo.url, isPhish: false, legitimatePercent: 0 }).catch(()=>{});
+    setTabState(tabId, { status: ANALYSIS_STATUS.ANALYZING, result: null, url: changeInfo.url, isPhish: false, legitimatePercent: null }).catch(()=>{});
   }
 });
 
@@ -478,11 +601,17 @@ chrome.webRequest.onBeforeRequest.addListener(safeCheck, { urls: ['*://*/*'], ty
 
 
 // Download risk guard — pause dangerous files from suspicious pages and ask user.
-const DANGEROUS_DOWNLOAD_EXTS = ['.exe', '.scr', '.bat', '.cmd', '.apk', '.jar', '.ps1'];
+const DANGEROUS_DOWNLOAD_EXTS = ['.exe', '.scr', '.bat', '.cmd', '.apk', '.jar', '.ps1', '.msi', '.dll', '.vbs', '.zip', '.rar', '.7z'];
 const pendingDownloads = new Map();
-const _downloadExt = (u, filename='') => {
+const _downloadExt = (u, filename='', mime='') => {
   const raw = (filename || u || '').split('?')[0].split('#')[0].toLowerCase();
-  return DANGEROUS_DOWNLOAD_EXTS.find(ext => raw.endsWith(ext)) || null;
+  const doubleExt = /\.(pdf|doc|docx|xls|xlsx|ppt|pptx|jpg|jpeg|png|gif|txt|rtf)\.(exe|scr|bat|cmd|ps1|vbs|jar|apk|msi|dll)$/i.exec(raw);
+  if (doubleExt) return '.' + doubleExt[2].toLowerCase();
+  const ext = DANGEROUS_DOWNLOAD_EXTS.find(ext => raw.endsWith(ext));
+  if (ext) return ext;
+  const m = String(mime || '').toLowerCase();
+  if (/application\/(x-msdownload|x-msdos-program|x-msi|vnd.android.package-archive|java-archive|x-sh|x-bat|x-powershell|zip|x-7z-compressed|vnd.rar)/.test(m)) return m.includes('zip') ? '.zip' : (m.includes('7z') ? '.7z' : (m.includes('rar') ? '.rar' : '.bin'));
+  return null;
 };
 const _isDownloadFromRiskyContext = async (item) => {
   try {
@@ -499,7 +628,7 @@ const _isDownloadFromRiskyContext = async (item) => {
 };
 if (chrome.downloads && chrome.downloads.onCreated) {
   chrome.downloads.onCreated.addListener(async (item) => {
-    const ext = _downloadExt(item.finalUrl || item.url, item.filename);
+    const ext = _downloadExt(item.finalUrl || item.url, item.filename, item.mime);
     if (!ext) return;
     const risky = await _isDownloadFromRiskyContext(item);
     if (!risky) return;
