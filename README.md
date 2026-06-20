@@ -5,7 +5,9 @@
 
 Mô hình học máy phân loại được chạy trực tiếp trên trình duyệt, kết hợp cùng cơ chế Heuristic nội bộ giúp phát hiện các hành vi lừa đảo tinh vi một cách tức thời.
 
-Mã nguồn gốc được phát triển dựa trên dự án [Phishing Site Detector Plugin](https://github.com/picopalette/phishing-detection-plugin) và [ChongLuaDao](https://github.com/7zones/chongluadao-extension).
+Mã nguồn gốc được phát triển dựa trên dự án [Phishing Site Detector Plugin](https://github.com/picopalette/phishing-detection-plugin).
+
+Mã nguồn của browser extension [ChongLuaDao](https://github.com/7zones/chongluadao-extension).
 
 # Những chức năng của extension
 
@@ -155,8 +157,6 @@ Bạn có thể cài đặt và sử dụng tiện ích trên Chrome (hoặc cá
 5. Có thể sẽ xuất hiện một số lỗi do đây là phiên bản đang phát triển, bạn có thể bỏ qua
 6. Bắt đầu sử dụng tiện ích
 
----
-
 # Thiết lập môi trường phát triển cục bộ (Local Development)
 
 Cài đặt các thư viện cần thiết:
@@ -165,12 +165,19 @@ Cài đặt các thư viện cần thiết:
 npm i
 ```
 
-Nếu chưa có thư mục, hãy tạo chúng:
+Nếu chưa có thư mục `build` hoặc `build-firefox`, hãy tạo chúng:
 ```bash
 mkdir build
+mkdir build-firefox
 ```
 
 ## Build cho Chrome
 ```bash
 npm run build
 ```
+
+## Build cho Firefox
+```bash
+npm run build-firefox
+```
+Sau đó, vào thư mục `build-firefox` và xóa thuộc tính `incognito` trong tệp `manifest.json`.

@@ -458,7 +458,7 @@ chrome.tabs.query({ currentWindow: true, active: true }, ([tab]) => {
 
 // Community report UI
 // Đổi domain này nếu Render cấp URL khác cho service backend của bạn.
-const REPORT_API_URL = 'https://anti-scam-api.onrender.com/api/report';
+const REPORT_API_URL = 'https://anti-scam-6iix.onrender.com/api/report';
 const REPORT_MAX_FILE_SIZE = 5 * 1024 * 1024;
 const REPORT_ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
 

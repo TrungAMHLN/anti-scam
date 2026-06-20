@@ -3,27 +3,21 @@ const config = require('config');
 const express = require('express');
 
 const cors = require('cors');
-const bodyParser = require('body-parser');
 const status = require('http-status');
 const jwt = require('jsonwebtoken');
 const rateLimit = require("express-rate-limit");
 
 const path = require('path');
 const fs = require('fs');
-const { Parser } = require('json2csv');
 const morgan = require('morgan');
 const axios = require('axios');
 const multer = require('multer');
-const _ = require('lodash/array');
 
 const { MongoClient } = require('mongodb');
 const dns = require('dns').promises;
 const crypto = require('crypto');
 const querystring = require('querystring');
 
-const fields = ['time','rating', 'url', 'ip', 'client'];
-const opts = { fields, header: false };
-const parser = new Parser(opts);
 
 var refreshTokens = [];
 const APP_VERSION = process.env.APP_VERSION || config.get("app.version");
@@ -52,11 +46,8 @@ app.use(cors());
 app.use(express.static('public'));
 
 // Enable the use of request body parsing middleware
-app.use(bodyParser.json());
-app.use(bodyParser.json({limit: '1mb'}));
-app.use(bodyParser.urlencoded({
-  extended: true
-}));
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true }));
 const upload = multer();
 const REPORT_ALLOWED_MIME = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/webp']);
 const reportUpload = multer({
@@ -74,6 +65,10 @@ app.use(morgan('combined', { stream: accessLogStream }))
 // Health check cho Render/Railway/VPS
 app.get('/', (req, res) => res.status(200).send({ ok: true, service: 'AntiScam API' }));
 app.get('/health', (req, res) => res.status(200).send({ ok: true, service: 'AntiScam API' }));
+
+// Classifier ML là tín hiệu phụ ở extension. Nếu chưa có model public trong backend,
+// trả về null để extension bỏ qua ML an toàn thay vì fail request /classifier.json.
+app.get('/classifier.json', (req, res) => res.status(200).json(null));
 
 // Rate limit
 app.use(`/${APP_VERSION}/rate`, apiLimiter);
@@ -101,7 +96,7 @@ const authenticateJWT = (req, res, next) => {
 
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Threat intelligence helpers (server-side only). API keys are read from config or
+// Threat intelligence helpers (server-side only). API keys are read from
 // environment variables, never from the browser extension.
 // ─────────────────────────────────────────────────────────────────────────────
 const getCfg = (pathName, fallback = null) => {
@@ -123,6 +118,31 @@ const normalizeUrlInput = (value) => {
     if (/^https?:\/\//i.test(trimmed)) return trimmed;
     return 'http://' + trimmed;
 };
+
+const LIST_COLLECTIONS = new Set(['blacklist', 'whitelist', 'pornlist']);
+const isValidListType = (value) => LIST_COLLECTIONS.has(String(value || '').trim());
+const normalizeListDocument = (item, listType = 'blacklist') => {
+    const raw = typeof item === 'string' ? { url: item } : (item || {});
+    const urlValue = String(raw.url || raw.domain || raw.host || '').trim();
+    const domain = normalizeHostname(urlValue);
+    if (!domain) return null;
+    return {
+        ...raw,
+        url: urlValue,
+        domain,
+        type: listType,
+        status: raw.status || 'active',
+        source: raw.source || 'manual-import',
+        updatedAt: new Date(),
+        createdAt: raw.createdAt ? new Date(raw.createdAt) : new Date()
+    };
+};
+const chunkArray = (items, size) => {
+    const chunks = [];
+    for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
+    return chunks;
+};
+
 const withTimeout = (promise, ms, fallback) => Promise.race([
     promise.catch(() => fallback),
     new Promise(resolve => setTimeout(() => resolve(fallback), ms))
@@ -399,16 +419,6 @@ app.post(`/${APP_VERSION}/rate`, authenticateJWT, function(req, res) {
     else {
         if (params) {
             db.collection("rating").insertOne(params);
-            /*
-            const data = parser.parse(params);
-            fs.appendFile(config.get("app.storage"), `${data}\r\n`, 'utf8', function (err) {
-                if (err) {
-                    console.log('Some error occured - file either not saved or corrupted file saved.');
-                } else{
-                    console.log('saved: ',  data);
-                }
-            });
-            */
         }
 
         res.status(status.OK).send({
@@ -516,25 +526,24 @@ app.post('/api/report', reportLimiter, function(req, res, next) {
  * @param {String} typelist  type of list we wanna get ('blacklist' or 'whitelist')
  * @return {JSON} array of objects
  */
-app.get(`/${APP_VERSION}/:typelist`, function(req, res) {
-    let type = null
-    switch (req.params.typelist) {
-        case "blacklist":
-            type = "blacklist"
-            break;
-        case "whitelist":
-            type = "whitelist"
-            break;
-        case "pornlist":
-            type = "pornlist"
-            break;
-        default:
-            res.status(400).send(req.params.typelist + " is not a valid type of list")
-    }
+app.get(`/${APP_VERSION}/:typelist`, async function(req, res) {
+    const type = String(req.params.typelist || '').trim();
+    if (!isValidListType(type)) return res.status(status.BAD_REQUEST).send(`${type} is not a valid type of list`);
+    if (!db) return res.status(status.SERVICE_UNAVAILABLE).send([]);
 
-    db.collection(type).find().toArray().then(result => {
-        res.status(status.OK).send(result);
-    })
+    try {
+        const result = await db.collection(type)
+            .find({ $or: [{ status: { $exists: false } }, { status: 'active' }] })
+            .project({ url: 1, domain: 1, type: 1, source: 1, updatedAt: 1 })
+            .toArray();
+        res.status(status.OK).send(result.map(item => ({
+            ...item,
+            url: item.url || item.domain
+        })).filter(item => item.url));
+    } catch (err) {
+        console.log(`${type} list error`, err && err.message);
+        res.status(status.INTERNAL_SERVER_ERROR).send([]);
+    }
 
 })
 
@@ -564,32 +573,36 @@ app.post(`/${APP_VERSION}/res/:resId`, authenticateJWT, function(req, res) {
 });
 
 app.post(`/${APP_VERSION}/importFiles/:typelist`,  upload.single('file'), async (req, res) => {
-    const rawData = req.file.buffer.toString();
-    const chunkData = _.chunk(JSON.parse(rawData), 1000);
-    switch (req.params.typelist) {
-        case "blacklist":
-            type = "blacklist"
-            break;
-        case "whitelist":
-            type = "whitelist"
-            break;
-        case "pornlist":
-            type = "pornlist"
-            break;
-        default:
-            res.status(400).send(req.params.typelist + " is not a valid type of list")
-    }
+    const type = String(req.params.typelist || '').trim();
+    if (!isValidListType(type)) return res.status(status.BAD_REQUEST).send(`${type} is not a valid type of list`);
+    if (!req.file || !req.file.buffer) return res.status(status.BAD_REQUEST).send({ message: 'file is required' });
 
+    const rawData = req.file.buffer.toString();
+    const parsed = JSON.parse(rawData);
+    const rows = Array.isArray(parsed) ? parsed : [parsed];
+    const normalizedRows = rows.map(item => normalizeListDocument(item, type)).filter(Boolean);
+    const chunkData = chunkArray(normalizedRows, 1000);
+    let upserted = 0;
 
     for (let i = 0; i < chunkData.length; i++) {
         try {
-            await db.collection(type).insertMany(chunkData[i]);
+            const ops = chunkData[i].map(item => ({
+                updateOne: {
+                    filter: { url: item.url },
+                    update: { $set: { ...item, updatedAt: new Date() }, $setOnInsert: { createdAt: item.createdAt || new Date() } },
+                    upsert: true
+                }
+            }));
+            if (ops.length) {
+                const result = await db.collection(type).bulkWrite(ops, { ordered: false });
+                upserted += (result.upsertedCount || 0) + (result.modifiedCount || 0);
+            }
         } catch(err) {
-            console.log(err);
+            console.log(`${type} import error`, err && err.message);
         }
     }
 
-    res.status(status.OK).send({message: 'INSERT SUCCESS'});
+    res.status(status.OK).send({ message: 'INSERT SUCCESS', type, received: rows.length, valid: normalizedRows.length, upserted });
 })
 
 app.post(`/${APP_VERSION}/safecheck`, function(req, res) {
@@ -634,52 +647,6 @@ app.post(`/${APP_VERSION}/safecheck`, function(req, res) {
                 res.status(status.OK).send({type: "nodata"});
             }
         })
-        // If doesn't exists in our DB, check other APIs :
-
-        // Google API Promise
-        // let googleSafeCheckPromise = new Promise((resolve, reject) => {
-        //     axios({
-        //         method: 'post',
-        //         url: `${config.get("gcloud.safecheckUrl")}?key=${config.get("gcloud.key")}`,
-        //         headers: {
-        //             "Content-Type": "application/json"
-        //         },
-        //         data:  {
-        //             client: {
-        //               clientId: "antiscam",
-        //               clientVersion: "1.0.0"
-        //             },
-        //             threatInfo: {
-        //               threatTypes: [ "MALWARE",
-        //                              "SOCIAL_ENGINEERING",
-        //                              "UNWANTED_SOFTWARE",
-        //                              "MALICIOUS_BINARY",
-        //                              "POTENTIALLY_HARMFUL_APPLICATION"],
-        //               platformTypes: ["ANY_PLATFORM"],
-        //               threatEntryTypes: ["URL"],
-        //               threatEntries: [
-        //                 { url: url + "/" }
-        //               ]
-        //             }
-        //         }
-        //     }).then((gRes) => {
-        //       if(gRes && gRes.data && gRes.data.matches && gRes.data.matches.length > 0) {
-        //         resolve(false);
-        //       } else {
-        //         resolve(true);
-        //       }
-        //     });
-        // })
-
-        // Promise.all([
-        //         googleSafeCheckPromise,
-        //     ]).then((result) => {
-        //     if(result.every(val => val == true)) {
-                
-        //     } else {
-        //         res.status(status.OK).send({type: "unsafe"});
-        //     }
-        // });
 
     })
 });
@@ -1045,6 +1012,11 @@ MongoClient.connect(mongoUrl, {
     db = database.db(getMongoDatabaseName());
     db.collection('reports').createIndex({ deviceFingerprint: 1, domain: 1 }, { unique: true }).catch(err => console.log('reports index error', err && err.message));
     db.collection('reports').createIndex({ domain: 1, createdAt: -1 }).catch(err => console.log('reports domain index error', err && err.message));
+    ['blacklist', 'whitelist', 'pornlist'].forEach((type) => {
+        db.collection(type).createIndex({ url: 1 }, { unique: true, sparse: true }).catch(err => console.log(`${type} url index error`, err && err.message));
+        db.collection(type).createIndex({ domain: 1, status: 1 }).catch(err => console.log(`${type} domain index error`, err && err.message));
+    });
+    db.collection('rating').createIndex({ url: 1, time: -1 }).catch(err => console.log('rating index error', err && err.message));
     console.info("Launch the API Server at ", APP_DOMAIN, ":", APP_PORT);
     app.listen(APP_PORT);
  });
