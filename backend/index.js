@@ -1,9 +1,9 @@
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
 const config = require('config');
 const express = require('express');
 
 const cors = require('cors');
-const status = require('http-status');
+const { status } = require('http-status');
 const jwt = require('jsonwebtoken');
 const rateLimit = require("express-rate-limit");
 
@@ -40,7 +40,7 @@ const reportLimiter = rateLimit({
 
 
 const app = express();
-app.set('trust proxy', true);
+app.set('trust proxy', 1);
 // Enable CORS
 app.use(cors());
 app.use(express.static('public'));
@@ -1000,23 +1000,30 @@ const getMongoDatabaseName = () => {
     }
     return fallbackMongoDatabase;
 };
-MongoClient.connect(mongoUrl, {
-    useUnifiedTopology: true,
-}, (err, database) => {
-    // ... start the server
-    if (err) {
-        console.log('error: ', err);
-        return;
-    }
+const mongoClient = new MongoClient(mongoUrl, {
+    serverSelectionTimeoutMS: Number(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS || 15000)
+});
 
-    db = database.db(getMongoDatabaseName());
-    db.collection('reports').createIndex({ deviceFingerprint: 1, domain: 1 }, { unique: true }).catch(err => console.log('reports index error', err && err.message));
-    db.collection('reports').createIndex({ domain: 1, createdAt: -1 }).catch(err => console.log('reports domain index error', err && err.message));
-    ['blacklist', 'whitelist', 'pornlist'].forEach((type) => {
-        db.collection(type).createIndex({ url: 1 }, { unique: true, sparse: true }).catch(err => console.log(`${type} url index error`, err && err.message));
-        db.collection(type).createIndex({ domain: 1, status: 1 }).catch(err => console.log(`${type} domain index error`, err && err.message));
-    });
-    db.collection('rating').createIndex({ url: 1, time: -1 }).catch(err => console.log('rating index error', err && err.message));
-    console.info("Launch the API Server at ", APP_DOMAIN, ":", APP_PORT);
-    app.listen(APP_PORT);
- });
+async function startServer() {
+    try {
+        await mongoClient.connect();
+
+        db = mongoClient.db(getMongoDatabaseName());
+        await db.collection('reports').createIndex({ deviceFingerprint: 1, domain: 1 }, { unique: true }).catch(err => console.log('reports index error', err && err.message));
+        await db.collection('reports').createIndex({ domain: 1, createdAt: -1 }).catch(err => console.log('reports domain index error', err && err.message));
+        for (const type of ['blacklist', 'whitelist', 'pornlist']) {
+            await db.collection(type).createIndex({ url: 1 }, { unique: true, sparse: true }).catch(err => console.log(`${type} url index error`, err && err.message));
+            await db.collection(type).createIndex({ domain: 1, status: 1 }).catch(err => console.log(`${type} domain index error`, err && err.message));
+        }
+        await db.collection('rating').createIndex({ url: 1, time: -1 }).catch(err => console.log('rating index error', err && err.message));
+
+        app.listen(APP_PORT, () => {
+            console.info("Launch the API Server at ", APP_DOMAIN, ":", APP_PORT);
+        });
+    } catch (err) {
+        console.error('MongoDB connection failed:', err);
+        process.exit(1);
+    }
+}
+
+startServer();
