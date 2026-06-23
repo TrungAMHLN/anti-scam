@@ -25,6 +25,12 @@
         <i class="fa-solid fa-sun theme-icon theme-icon-light"></i>
       </span>
     </label>
+
+    <!-- Nút quay về — chỉ hiện khi đang xem kết quả quét URL tuỳ chọn -->
+    <button id="backToCurrentTab" type="button" class="back-btn" hidden>
+      <i class="fa-solid fa-arrow-left"></i>
+    </button>
+
     <h2 id="domain_url"></h2>
 
     <div id="pluginBody">
@@ -40,6 +46,39 @@
         <button type="button" class="collapsible">Xem chi tiết</button>
         <div class="feature-content">
           <ul id="features"></ul>
+        </div>
+
+        <!-- ═══════════════════════════════════════════════════════════════ -->
+        <!-- KHỐI QUÉT URL TUỲ CHỌN — nằm giữa "Xem chi tiết" và "Báo cáo" -->
+        <!-- ═══════════════════════════════════════════════════════════════ -->
+        <div id="url_scan_section">
+          <div class="url-scan-header">
+            <span class="url-scan-title"><i class="fa-solid fa-shield-halved"></i> Quét URL tuỳ chọn</span>
+            <button id="historyToggle" type="button" class="history-toggle-btn" title="Xem lịch sử quét">
+              <i class="fa-solid fa-clock-rotate-left"></i>
+            </button>
+          </div>
+
+          <!-- Input + nút quét -->
+          <div class="url-scan-input-row">
+            <input id="customUrlInput" type="url" class="url-scan-input" placeholder="Nhập URL cần quét (https://...)" autocomplete="off" spellcheck="false">
+            <button id="customUrlScanBtn" type="button" class="url-scan-btn" title="Quét URL">
+              <i class="fa-solid fa-magnifying-glass"></i>
+            </button>
+          </div>
+          <div id="customUrlScanStatus" class="url-scan-status"></div>
+
+          <!-- Panel lịch sử quét -->
+          <div id="historyPanel" class="history-panel" hidden>
+            <div class="history-panel-header">
+              <span class="history-panel-title"><i class="fa-solid fa-clock-rotate-left"></i> Lịch sử quét</span>
+              <button id="historyCloseBtn" type="button" class="history-close-btn" title="Đóng">
+                <i class="fa-solid fa-xmark"></i>
+              </button>
+            </div>
+            <ul id="historyList" class="history-list"></ul>
+            <div id="historyEmpty" class="history-empty">Chưa có URL nào được quét.</div>
+          </div>
         </div>
 
         <div id="community_report">
