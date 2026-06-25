@@ -19,7 +19,12 @@ const logger = {
 // ─────────────────────────────────────────────────────────────────────────────
 const ANALYSIS_STATUS = Object.freeze({ IDLE:'IDLE', ANALYZING:'ANALYZING', SUCCESS:'SUCCESS', FAILED:'FAILED', OFFLINE:'OFFLINE' });
 const BLACKLIST_TTL_MS = 60*60*1000, OPENPHISH_TTL_MS = 15*60*1000, CLASSIFIER_TTL_MS = 5*60*1000;
-const RESULT_CACHE_TTL_MS = 10*60*1000, INTEL_CACHE_TTL_MS = 30*60*1000, FETCH_TIMEOUT_MS = 10_000, MAX_RETRIES = 3;
+// Cache TTLs riêng biệt cho từng loại dữ liệu
+const RESULT_CACHE_TTL_MS = 10*60*1000;     // Live Scan result: 10 phút
+const QUICK_CACHE_TTL_MS  = 30*60*1000;     // Quick Scan result: 30 phút
+const STATIC_CACHE_TTL_MS = 6*60*60*1000;   // Blacklist/Reputation: 6 giờ
+const DOMAIN_AGE_TTL_MS   = 24*60*60*1000;  // Domain Age (RDAP): 24 giờ
+const INTEL_CACHE_TTL_MS = 30*60*1000, FETCH_TIMEOUT_MS = 10_000, MAX_RETRIES = 3;
 const RESULT_CACHE_SCHEMA = 2;
 const API_BASE = 'https://anti-scam-6iix.onrender.com';
 const BACKEND_BASE = API_BASE;
@@ -28,6 +33,8 @@ const PORT_REDIRECT = 'REDIRECT_PORT_NAME', PORT_CLOSE_TAB = 'CLOSE_TAB_PORT_NAM
 const RISK_BLOCK_THRESHOLD = 55;
 const RISK_BLOCK_ALLOW_MS = 5 * 60 * 1000;
 const riskBlockAllowUntil = new Map();
+// deepScanTabs: Map<tabId, { url, dwellTimer, hardTimeout }>
+const deepScanTabs = new Map();
 const ipRe = /^(\d{1,3}\.){3}\d{1,3}$/;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -120,18 +127,25 @@ const getTabState = async (tabId) => { try { const d = await chrome.storage.sess
 const setTabState = async (tabId, state) => { try { await chrome.storage.session.set({ [`tab_${tabId}`]: { ...state, updatedAt: Date.now() } }); } catch(e){ logger.error('setTabState', e); } };
 const removeTabState = async (tabId) => { try { await chrome.storage.session.remove(`tab_${tabId}`); } catch(e){} };
 
-const getUrlCache = async (url) => {
+const getUrlCache = async (url, requiredStage = 'LIVE') => {
   try {
     let h=0; for (let i=0;i<url.length;i++){ h=((h<<5)-h)+url.charCodeAt(i); h|=0; }
     const d = await chrome.storage.session.get(`cache_${h}`);
-    const it = d[`cache_${h}`]; if (it && it.schemaVersion === RESULT_CACHE_SCHEMA && Date.now()-it.timestamp < RESULT_CACHE_TTL_MS) return it;
+    const it = d[`cache_${h}`];
+    if (!it) return null;
+    if (it.schemaVersion !== RESULT_CACHE_SCHEMA) return null;
+    // Không dùng QUICK cache cho LIVE scan — tín hiệu không đầy đủ
+    if (requiredStage === 'LIVE' && it.stage === 'QUICK') return null;
+    const ttl = (it.stage === 'QUICK') ? QUICK_CACHE_TTL_MS : RESULT_CACHE_TTL_MS;
+    if (Date.now() - it.timestamp >= ttl) return null;
+    return it;
   } catch(e){}
   return null;
 };
-const setUrlCache = async (url, data) => {
+const setUrlCache = async (url, data, stage = 'LIVE') => {
   try {
     let h=0; for (let i=0;i<url.length;i++){ h=((h<<5)-h)+url.charCodeAt(i); h|=0; }
-    await chrome.storage.session.set({ [`cache_${h}`]: { ...data, schemaVersion: RESULT_CACHE_SCHEMA, timestamp: Date.now() } });
+    await chrome.storage.session.set({ [`cache_${h}`]: { ...data, stage, schemaVersion: RESULT_CACHE_SCHEMA, timestamp: Date.now() } });
   } catch(e){}
 };
 
@@ -153,8 +167,15 @@ const fetchDomainAge = async (domain) => {
     const cached = await chrome.storage.session.get(key);
     if (cached && cached[key] !== undefined) {
       const c = cached[key];
-      if (typeof c === 'number') return { ageDays: c, source: 'rdap-cache' };
-      return c;
+      // Domain Age cache TTL: 24 giờ (ít thay đổi)
+      if (c._cachedAt && Date.now() - c._cachedAt < DOMAIN_AGE_TTL_MS) {
+        if (typeof c === 'number') return { ageDays: c, source: 'rdap-cache' };
+        return c;
+      } else if (!c._cachedAt) {
+        // Dữ liệu cũ không có _cachedAt → vẫn dùng
+        if (typeof c === 'number') return { ageDays: c, source: 'rdap-cache' };
+        return c;
+      }
     }
     const ctrl = new AbortController(); const t = setTimeout(()=>ctrl.abort(), 3500);
     const res = await fetch(`https://rdap.org/domain/${base}`, { signal: ctrl.signal }); clearTimeout(t);
@@ -163,7 +184,7 @@ const fetchDomainAge = async (domain) => {
     const registrationDate = _pickRdapDate(data && data.events, ['registration']);
     const expirationDate = _pickRdapDate(data && data.events, ['expiration', 'expiry']);
     const ageDays = registrationDate ? (Date.now() - new Date(registrationDate).getTime())/(1000*60*60*24) : -1;
-    const info = { ageDays, registrationDate, expirationDate, source: 'rdap' };
+    const info = { ageDays, registrationDate, expirationDate, source: 'rdap', _cachedAt: Date.now() };
     await chrome.storage.session.set({ [key]: info }); return info;
   } catch (err) { logger.warn(`fetchDomainAge ${domain}:`, err.message); }
   return { ageDays: -1, source: 'rdap', status: 'error' };
@@ -322,12 +343,14 @@ const _analyzePageLinks = async (links, pageDomain) => {
 };
 
 const resolveReputation = (domain, registrable, urlString, backendIntel = null) => {
-  const inBuiltWhitelist = typeof REPUTATION_WHITELIST !== 'undefined' && REPUTATION_WHITELIST.has(registrable);
+  const whitelist = typeof self !== 'undefined' && self.REPUTATION_WHITELIST ? self.REPUTATION_WHITELIST : (typeof REPUTATION_WHITELIST !== 'undefined' ? REPUTATION_WHITELIST : new Set());
+  const inBuiltWhitelist = whitelist.has(registrable);
   let inCldWhitelist = false;
   for (const w of whiteListingSet) { if (w.includes(domain) || w.includes(registrable)) { inCldWhitelist = true; break; } }
   let inBlacklist = blackListingSet.has(urlString) || blackListingSet.has(urlString.replace(/\/$/,''));
   if (!inBlacklist && blackListing.length) { for (const b of blackListing) { if (urlString.includes(b.replace(/\/$/,''))) { inBlacklist = true; break; } } }
-  const officialBrand = typeof isOfficialBrandDomain !== 'undefined' ? isOfficialBrandDomain(domain) : null;
+  const checkBrand = typeof self !== 'undefined' && self.isOfficialBrandDomain ? self.isOfficialBrandDomain : (typeof isOfficialBrandDomain !== 'undefined' ? isOfficialBrandDomain : null);
+  const officialBrand = checkBrand ? checkBrand(domain) : null;
   const intel = backendIntel || {};
   return {
     inWhitelist: inBuiltWhitelist || inCldWhitelist,
@@ -407,7 +430,8 @@ const classify = async (tabId, featuresResult, urlString, domInput = {}, isUpdat
     }
 
     if (!isUpdate) {
-      const cached = await getUrlCache(urlString);
+      // LIVE scan chỉ dùng cache LIVE — không dùng QUICK cache
+      const cached = await getUrlCache(urlString, 'LIVE');
       if (cached) {
         await setTabState(tabId, { status: ANALYSIS_STATUS.SUCCESS, isPhish: cached.isPhish, legitimatePercent: cached.legitimatePercent, confidence: cached.confidence,
           riskScore: cached.riskScore || 0, trustScore: cached.trustScore || 0, trustContext: cached.trustContext || null,
@@ -434,7 +458,7 @@ const classify = async (tabId, featuresResult, urlString, domInput = {}, isUpdat
     const redirectHopRisk = ((c) => { if (!Array.isArray(c)) return {bad:false,badHops:[]}; const bh=[]; for (const u of c) { if (_isKnownBadUrl(u)) bh.push(u); } return {bad:bh.length>0,badHops:bh.slice(0,6)}; })(redirectChain);
     if (redirectHopRisk.bad) { enrichedDom.redirectBadHop = true; enrichedDom.redirectBadHops = redirectHopRisk.badHops; }
 
-    const assessment = computeScore(urlString, { dom: enrichedDom, domainAgeDays, domainAge, reputation, redirectChain, stabilityMs });
+    const assessment = computeLiveScore(urlString, { dom: enrichedDom, domainAgeDays, domainAge, reputation, redirectChain, stabilityMs });
 
     let riskScore = assessment.riskScore, finalScore = assessment.finalScore, confidence = assessment.confidence;
 
@@ -449,16 +473,26 @@ const classify = async (tabId, featuresResult, urlString, domInput = {}, isUpdat
     for (const k in (assessment.result || {})) { mergedResult[k] = assessment.result[k]; }
 
     const isPhish = finalScore <= 30;
-    await setTabState(tabId, {
+    const finalState = {
       status: ANALYSIS_STATUS.SUCCESS, isPhish, legitimatePercent: finalScore, confidence,
+      stage: assessment.stage || 'LIVE',
       trustScore: assessment.trustScore, riskScore, trustContext: assessment.trustContext, isUnknown: assessment.isUnknown,
       result: mergedResult, summary: assessment.summary, explanations: assessment.explanations || [],
       domainAge: assessment.domainAge || domainAge, reputation,
       counts: (() => { if (!enrichedDom || !enrichedDom.counts) return null; const c = {...enrichedDom.counts, suspiciousLinks:enrichedDom.suspiciousLinkCount||0, deceptiveLinks:enrichedDom.deceptiveLinkCount||0}; if(c.links){c.links={...c.links};c.links.dangerous=enrichedDom.suspiciousLinkCount||0;c.links.warning=Math.max(0,(c.links.warning||0)-c.links.dangerous);c.links.safe=Math.max(0,(c.links.total||0)-c.links.warning-c.links.dangerous);} return c; })(),
       analysisStart, url: urlString,
-    });
+    };
+    await setTabState(tabId, finalState);
 
-    if (!isUpdate) { await setUrlCache(urlString, { isPhish, legitimatePercent: finalScore, confidence, riskScore, trustScore: assessment.trustScore, trustContext: assessment.trustContext, result: mergedResult, summary: assessment.summary, explanations: assessment.explanations || [], isUnknown: assessment.isUnknown }); }
+    // Nếu đây là deep scan tab: lưu kết quả tạm, KHÔNG đóng tab
+    // Để dwell timer chạy tiếp — behavioral signals sẽ tiếp tục đổ vào qua ANALYSIS_UPDATE
+    if (deepScanTabs.has(tabId)) {
+      logger.info(`[DEEP_SCAN_INTERIM] tabId=${tabId} url=${urlString} score=${finalScore} isUpdate=${isUpdate}`);
+      await setUrlScanResult(urlString, { ...finalState, scanSource: 'CUSTOM_URL', isInterim: true });
+      return; // Không badge, không block, không đóng tab
+    }
+
+    if (!isUpdate) { await setUrlCache(urlString, { isPhish, legitimatePercent: finalScore, confidence, riskScore, trustScore: assessment.trustScore, trustContext: assessment.trustContext, result: mergedResult, summary: assessment.summary, explanations: assessment.explanations || [], isUnknown: assessment.isUnknown }, 'LIVE'); }
     updateBadge(isPhish, finalScore, tabId);
 
     if (!isRiskBlockAllowed(tabId) && shouldAutoBlock(assessment, reputation)) {
@@ -468,6 +502,42 @@ const classify = async (tabId, featuresResult, urlString, domInput = {}, isUpdat
     logger.error(`classify ${tabId}:`, err);
     await setTabState(tabId, { status: ANALYSIS_STATUS.FAILED, isPhish: false, legitimatePercent: null, confidence: 0, result: featuresResult || {}, summary: 'Không thể phân tích trang này.', url: urlString });
   }
+};
+
+// Đọc kết quả cuối cùng từ tabState và lưu vào URL scan result, sau đó dọn dẹp
+const finalizeDeepScan = async (tabId) => {
+  const meta = deepScanTabs.get(tabId);
+  if (!meta) return;
+  const { url: urlString } = meta;
+  logger.info(`[DEEP_SCAN_FINALIZE_START] tabId=${tabId} url=${urlString}`);
+
+  // Chờ classify chạy xong (chuyển sang SUCCESS hoặc FAILED)
+  let state = await getTabState(tabId);
+  for (let i = 0; i < 30; i++) {
+    if (state && state.status !== ANALYSIS_STATUS.ANALYZING) break;
+    await new Promise(r => setTimeout(r, 500));
+    state = await getTabState(tabId);
+  }
+
+  deepScanTabs.delete(tabId);
+  removeTabState(tabId); // Bây giờ mới an toàn xoá tabState
+
+  try {
+    if (state && state.status === ANALYSIS_STATUS.SUCCESS) {
+      await setUrlScanResult(urlString, { ...state, scanSource: 'CUSTOM_URL', isInterim: false });
+      logger.info(`[DEEP_SCAN_FINAL] url=${urlString} score=${state.legitimatePercent}`);
+    } else {
+      logger.warn(`[DEEP_SCAN_FINALIZE] No SUCCESS state for tabId=${tabId}, resolving interim or failing`);
+      const currentRes = await getUrlScanResult(urlString);
+      if (currentRes && currentRes.isInterim) {
+        await setUrlScanResult(urlString, { ...currentRes, isInterim: false });
+      } else if (!currentRes || currentRes.status === 'ANALYZING') {
+        await setUrlScanResult(urlString, { status: 'FAILED', isPhish: false, legitimatePercent: null, confidence: 0, result: {}, summary: 'Không thể phân tích trang web do quá trình tải bị lỗi.', url: urlString, scanSource: 'CUSTOM_URL', isInterim: false });
+      }
+    }
+  } catch(e) { logger.error('[DEEP_SCAN_FINALIZE]', e); }
+  
+  try { chrome.tabs.remove(tabId); } catch(e) {}
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -568,7 +638,17 @@ const fetchHtml = async (urlString) => {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 15_000);
   try {
-    const res = await fetch(urlString, { signal: ctrl.signal, redirect: 'follow' });
+    const res = await fetch(urlString, { 
+      signal: ctrl.signal, 
+      redirect: 'follow',
+      headers: {
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36'
+      }
+    });
     clearTimeout(t);
     if (!res.ok) return null;
     const ct = (res.headers.get('content-type') || '').toLowerCase();
@@ -676,6 +756,13 @@ const parseHtmlSignals = (urlString, html) => {
   dom.deceptiveLinks = deceptiveLinks.slice(0, 10);
   dom.deceptiveLinkCount = deceptiveLinks.length;
 
+  // ═══ Scam Content ═══
+  const scamKeywords = ['phishing', 'scam', 'hack', 'cheat', 'free-fire', 'nhantien', 'tangqua', 'khuyenmai', 'trungthuong', 'napthe'];
+  let keywordScamHits = 0;
+  const pageText = _stripTags(maxHtml).toLowerCase();
+  for (const kw of scamKeywords) { if (pageText.includes(kw)) keywordScamHits++; }
+  result['Scam Content'] = keywordScamHits >= 2 ? '2' : (keywordScamHits === 1 ? '0' : '-1');
+
   // ═══ Forms ═══
   let sensitiveFound = false, hijackFound = false, pwField = false, otpField = false, cardField = false, bankField = false, hiddenFormFound = false, sensitiveFormCount = 0;
   const sensitiveNames = ['password','passcode','passwd','otp','pin','cvv','cvc','cardnumber','card-number','creditcard','cccd','cmnd','stk','sotk','so-tai-khoan','ngan-hang','internet-banking'];
@@ -691,19 +778,14 @@ const parseHtmlSignals = (urlString, html) => {
       if (action.startsWith('http')) { try { const ah = new URL(action, urlString).hostname.replace(/^www\./, ''); if (_isExternal(ah) && !(typeof isTrustedHost !== 'undefined' && isTrustedHost(ah))) hijackFound = true; } catch {} }
     }
   }
-  dom.sensitiveForm = sensitiveFound; dom.formHijack = hijackFound; dom.passwordField = pwField;
-  dom.otpField = otpField; dom.cardField = cardField; dom.bankAccountField = bankField; dom.hiddenForm = hiddenFormFound;
-  result['Sensitive Form'] = sensitiveFound ? (cardField || bankField ? '2' : '0') : '-1';
-  result['Form Hijacking'] = hijackFound ? '1' : '-1';
-  result['Hidden Form'] = hiddenFormFound ? '2' : '-1';
-
-  // ═══ SFH / mailto ═══
+  
   result['SFH'] = '-1';
   for (const m of allForms) {
     const action = _extractAttr(m[0], 'action') || '';
     if (!action || action === '' || action === '#') result['SFH'] = '0';
     else if (action.startsWith('http')) { try { const ah = new URL(action, urlString).hostname.replace(/^www\./, ''); if (_isExternal(ah)) result['SFH'] = '1'; } catch {} }
   }
+
   result['mailto'] = '-1';
   for (const m of allForms) { if ((_extractAttr(m[0], 'action') || '').startsWith('mailto')) { result['mailto'] = '0'; break; } }
 
@@ -721,6 +803,16 @@ const parseHtmlSignals = (urlString, html) => {
   }
   dom.iframeRiskScore = iframeRiskScore;
   result['iFrames'] = iframeRiskScore >= 40 ? '1' : (iframeRiskScore >= 25 ? '2' : (iframeRiskScore >= 10 ? '0' : '-1'));
+
+  dom.sensitiveForm = sensitiveFound; dom.formHijack = hijackFound; dom.passwordField = pwField;
+  dom.otpField = otpField; dom.cardField = cardField; dom.bankAccountField = bankField; dom.hiddenForm = hiddenFormFound;
+  result['Sensitive Form'] = sensitiveFound ? (cardField || bankField ? '2' : '0') : '-1';
+  result['Form Hijacking'] = hijackFound ? '1' : '-1';
+  result['Hidden Form'] = hiddenFormFound ? '2' : '-1';
+
+  if (result['SFH'] === '0' && !sensitiveFound) result['SFH'] = '-1';
+
+  // (Obfuscation detection moved below — dùng inline-script parser nâng cao)
 
   // ═══ Brand detection from title/meta/h1/h2 ═══
   const titleMatch = maxHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
@@ -751,7 +843,16 @@ const parseHtmlSignals = (urlString, html) => {
   const scamHits = [];
   for (const p of VN_SCAM_PATTERNS) { if (p.re.test(bodyText)) scamHits.push(p.label); }
   dom.scamContentHits = scamHits; dom.scamContentRisk = scamHits.length;
-  result['Scam Content'] = scamHits.length >= 2 ? '2' : (scamHits.length === 1 ? '0' : '-1');
+  
+  const patternScamVal = scamHits.length >= 2 ? '2' : (scamHits.length === 1 ? '0' : '-1');
+  const keywordScamVal = result['Scam Content'] || '-1';
+  if (patternScamVal === '2' || keywordScamVal === '2') {
+    result['Scam Content'] = '2';
+  } else if (patternScamVal === '0' || keywordScamVal === '0') {
+    result['Scam Content'] = '0';
+  } else {
+    result['Scam Content'] = '-1';
+  }
   dom.contentRich = bodyText.length > 200;
 
   // ═══ Meta refresh redirect ═══
@@ -768,7 +869,6 @@ const parseHtmlSignals = (urlString, html) => {
   for (const m of inlineScripts) {
     const code = m[1]; if (!code || code.length < 80) continue;
     let conf = 0;
-    const compactCode = code.replace(/\s+/g, '');
     if ((code.match(/\\x[0-9a-fA-F]{2}/g) || []).length > 15 || (code.match(/\\u[0-9a-fA-F]{4}/g) || []).length > 15) conf += 30;
     if (/unescape\s*\(|String\.fromCharCode\s*\(/i.test(code)) conf += 25;
     if (/atob\s*\(/i.test(code)) conf += code.length > 2000 ? 15 : 8;
@@ -819,103 +919,56 @@ const parseHtmlSignals = (urlString, html) => {
   return { result, dom };
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// CUSTOM URL SCAN — HIDDEN TAB DEEP SCAN
+// Tái sử dụng hoàn toàn engine Realtime Scan:
+//   chrome.tabs.create({ active: false }) → content scripts inject tự động
+//   → classify() → dwell 6s → finalizeDeepScan() → lưu urlScanResult
+// ═══════════════════════════════════════════════════════════════════════════
+
+const DEEP_SCAN_HARD_TIMEOUT_MS = 15_000; // 15 giây hard timeout tổng
+const DEEP_SCAN_DWELL_MS        =  2_500; // 2.5 giây dwell sau khi page load
+
 /**
- * Phân tích URL bằng fetch + HTML parsing — KHÔNG MỞ TAB
+ * Khởi động Custom URL Deep Scan bằng hidden tab.
+ * Tab không active → người dùng không bị chuyển focus.
+ * Kết quả được lưu vào urlScanResult khi finalizeDeepScan() chạy.
  */
-const fetchAndAnalyzeUrl = async (urlString) => {
-  try { console.log("[FETCH_URL]", urlString); } catch(e){}
-  const domain = getDomain(urlString);
-  const registrable = getRegistrable(domain);
-
+const startHiddenTabScan = async (urlString) => {
+  logger.info(`[HIDDEN_TAB_SCAN_START] url=${urlString}`);
   try {
-    // 1. Kiểm tra whitelist
-    let inCldWhitelist = false;
-    for (const w of whiteListingSet) { if (w.includes(domain) || w.includes(registrable)) { inCldWhitelist = true; break; } }
-    if (inCldWhitelist || (typeof REPUTATION_WHITELIST !== 'undefined' && REPUTATION_WHITELIST.has(registrable))) {
-      logger.info(`[FEATURES_COLLECTED] url=${urlString} (whitelist)`);
-      await setUrlScanResult(urlString, { status: 'SUCCESS', isWhiteList: domain, isPhish: false, legitimatePercent: 100, confidence: 95, listType: 'whitelist', result: {}, summary: 'Trang nằm trong danh sách tin cậy.', url: urlString, scanSource: 'CUSTOM_URL' });
-      logger.info(`[RESULT_SAVED] url=${urlString} score=100 whitelist`);
-      logger.info(`[COMPLETED] url=${urlString} score=100`);
-      return;
-    }
+    const tab = await chrome.tabs.create({ url: urlString, active: false });
+    const tabId = tab.id;
 
-    // 2. Kiểm tra cache
-    const cached = await getUrlCache(urlString);
-    if (cached) {
-      logger.info(`[FEATURES_COLLECTED] url=${urlString} (cached)`);
-      await setUrlScanResult(urlString, { status: 'SUCCESS', ...cached, url: urlString, scanSource: 'CUSTOM_URL' });
-      logger.info(`[RESULT_SAVED] url=${urlString} score=${cached.legitimatePercent} (cached)`);
-      logger.info(`[COMPLETED] url=${urlString} score=${cached.legitimatePercent} (cached)`);
-      return;
-    }
+    // Hard timeout — phòng tab không bao giờ load xong
+    const hardTimeout = setTimeout(async () => {
+      logger.warn(`[HIDDEN_TAB_TIMEOUT] tabId=${tabId} url=${urlString}`);
+      await finalizeDeepScan(tabId);
+    }, DEEP_SCAN_HARD_TIMEOUT_MS);
 
-    // 3. Fetch HTML
-    logger.info(`[FEATURES_COLLECTED] url=${urlString} fetching...`);
-    const html = await fetchHtml(urlString);
-    logger.info(`[FEATURES_COLLECTED] url=${urlString} html=${html ? html.length + ' chars' : 'null'}`);
+    // Đăng ký vào deepScanTabs — classify() sẽ tự detect và lưu interim
+    deepScanTabs.set(tabId, { url: urlString, hardTimeout, dwellTimer: null });
 
-    // 4. Parse HTML signals
-    const signals = parseHtmlSignals(urlString, html);
-    const featuresResult = signals.result;
-    const domInput = signals.dom;
-
-    // 5. Domain age + backend intel + reputation
-    const rdapAge = await fetchDomainAge(domain);
-    const backendIntel = await fetchBackendIntel(urlString, domain);
-    const domainAge = mergeDomainAge(rdapAge, backendIntel && backendIntel.domainAge);
-    const domainAgeDays = domainAge.ageDays != null ? domainAge.ageDays : -1;
-    const reputation = resolveReputation(domain, registrable, urlString, backendIntel);
-
-    // 6. Compute score
-    const enrichedDom = { ...(domInput || {}) };
-    const suspiciousLinks = await _analyzePageLinks(enrichedDom.pageLinks || [], domain);
-    if (suspiciousLinks.length) { enrichedDom.suspiciousLinks = suspiciousLinks; enrichedDom.suspiciousLinkCount = suspiciousLinks.length; }
-
-    logger.info(`[CLASSIFYING] url=${urlString}`);
-    const assessment = computeScore(urlString, { dom: enrichedDom, domainAgeDays, domainAge, reputation, redirectChain: [], stabilityMs: 0 });
-
-    let riskScore = assessment.riskScore, finalScore = assessment.finalScore, confidence = assessment.confidence;
-
-    // 7. ML classifier
-    const resultValues = Object.entries(featuresResult || {}).filter(([k]) => k !== 'tab').map(([,v]) => parseInt(v));
-    const clf = await fetchCLF();
-    if (clf && resultValues.length) {
-      try { const isPhishML = randomForest(clf).predict([resultValues])[0][0]; if (isPhishML && riskScore < 40) { riskScore += 8; finalScore = Math.max(0, finalScore - 8); } } catch(e) { logger.warn('ML fail', e.message); }
-    }
-
-    // 8. Merge result
-    const mergedResult = {};
-    for (const k in (featuresResult || {})) { if (k !== 'tab') mergedResult[k] = featuresResult[k]; }
-    for (const k in (assessment.result || {})) { mergedResult[k] = assessment.result[k]; }
-
-    const isPhish = finalScore <= 30;
-
-    // 9. Cache
-    await setUrlCache(urlString, { isPhish, legitimatePercent: finalScore, confidence, riskScore, trustScore: assessment.trustScore, trustContext: assessment.trustContext, result: mergedResult, summary: assessment.summary, explanations: assessment.explanations || [], isUnknown: assessment.isUnknown });
-
-    // 10. Save result
-    const state = {
-      status: 'SUCCESS', isPhish, legitimatePercent: finalScore, confidence,
-      trustScore: assessment.trustScore, riskScore, trustContext: assessment.trustContext, isUnknown: assessment.isUnknown,
-      result: mergedResult, summary: assessment.summary, explanations: assessment.explanations || [],
-      domainAge: assessment.domainAge || domainAge, reputation,
-      counts: (() => { if (!enrichedDom || !enrichedDom.counts) return null; const c = {...enrichedDom.counts, suspiciousLinks:enrichedDom.suspiciousLinkCount||0, deceptiveLinks:enrichedDom.deceptiveLinkCount||0}; if(c.links){c.links={...c.links};c.links.dangerous=enrichedDom.suspiciousLinkCount||0;c.links.warning=Math.max(0,(c.links.warning||0)-c.links.dangerous);c.links.safe=Math.max(0,(c.links.total||0)-c.links.warning-c.links.dangerous);} return c; })(),
-      url: urlString, scanSource: 'CUSTOM_URL',
-    };
-
-    await setUrlScanResult(urlString, { ...state, updatedAt: Date.now() });
-    logger.info(`[RESULT_SAVED] url=${urlString} score=${finalScore} isPhish=${isPhish}`);
-    logger.info(`[COMPLETED] url=${urlString} score=${finalScore}`);
-
-  } catch (err) {
-    logger.error(`[FAILED] ${urlString}:`, err);
-    await setUrlScanResult(urlString, { status: 'FAILED', isPhish: false, legitimatePercent: null, confidence: 0, result: {}, url: urlString, scanSource: 'CUSTOM_URL', updatedAt: Date.now() });
+    logger.info(`[HIDDEN_TAB_CREATED] tabId=${tabId} url=${urlString}`);
+  } catch (e) {
+    logger.error(`[HIDDEN_TAB_CREATE_FAIL] url=${urlString}`, e.message);
+    // Fallback: đánh dấu low-confidence thay vì crash
+    await setUrlScanResult(urlString, {
+      status: 'LOW_CONFIDENCE',
+      isPhish: false,
+      legitimatePercent: null,
+      confidence: 15,
+      result: {},
+      summary: 'Không thể khởi động quét sâu. Hãy thử lại hoặc truy cập trang trực tiếp để xem kết quả.',
+      url: urlString,
+      scanSource: 'CUSTOM_URL',
+      updatedAt: Date.now(),
+    });
   }
 };
 
-// ═══════════════════════════════════════════════════════════════════════════
-// EVENT LISTENERS
-// ═══════════════════════════════════════════════════════════════════════════
+  // ─── EVENT LISTENERS ──────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === 'ANALYSIS_RESULT' || request.type === 'ANALYSIS_UPDATE') {
     const tabId = sender.tab ? sender.tab.id : null;
@@ -929,9 +982,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         .then(() => sendResponse({ ok:true }))
         .catch(err => { logger.error('ANALYSIS_RESULT', err); sendResponse({ ok:false }); });
     } else {
-      classify(tabId, request.result, tabUrl, request.dom, true)
-        .then(() => sendResponse({ ok:true }))
-        .catch(err => { logger.error('ANALYSIS_UPDATE', err); sendResponse({ ok:false }); });
+      getTabState(tabId).then(currentState => {
+        return setTabState(tabId, { ...(currentState || {}), status: ANALYSIS_STATUS.ANALYZING, result: request.result, url: tabUrl });
+      })
+      .then(() => classify(tabId, request.result, tabUrl, request.dom, true))
+      .then(() => sendResponse({ ok:true }))
+      .catch(err => { logger.error('ANALYSIS_UPDATE', err); sendResponse({ ok:false }); });
     }
     return true;
   }
@@ -958,27 +1014,50 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   // ═══════════════════════════════════════════════════════════════════════
-  // CUSTOM URL SCAN — FETCH-BASED (KHÔNG MỞ TAB)
+  // CUSTOM URL SCAN — Hidden Tab Deep Scan (tái sử dụng engine Realtime)
   // ═══════════════════════════════════════════════════════════════════════
   if (request.type === 'SCAN_URL') {
     const urlString = request.url;
     if (!urlString) { sendResponse({ ok: false, error: 'Missing url' }); return true; }
 
     logger.info(`[SCAN_JOB_CREATED] url=${urlString}`);
-    logger.info(`[SCAN_URL] ${urlString} (fetch-based, no tab)`);
-
-    // ✅ Phản hồi NGAY LẬP TỨC — sendResponse phải gọi đồng bộ trước async work
-    // Chrome message channel có thể đóng nếu sendResponse gọi sau await
     sendResponse({ ok: true });
 
-    // Lưu trạng thái ANALYZING + chạy phân tích hoàn toàn ngầm
     (async () => {
       try {
-        await setUrlScanResult(urlString, { status: 'ANALYZING', isPhish: false, legitimatePercent: null, confidence: 0, result: {}, url: urlString, scanSource: 'CUSTOM_URL' });
-        await fetchAndAnalyzeUrl(urlString);
+        const domain = getDomain(urlString);
+        const registrable = getRegistrable(domain);
+
+        // 1. Kiểm tra whitelist ngay
+        let inCldWhitelist = false;
+        for (const w of whiteListingSet) { if (w.includes(domain) || w.includes(registrable)) { inCldWhitelist = true; break; } }
+        if (inCldWhitelist || (typeof REPUTATION_WHITELIST !== 'undefined' && REPUTATION_WHITELIST.has(registrable))) {
+          await setUrlScanResult(urlString, { status: 'SUCCESS', isWhiteList: domain, isPhish: false, legitimatePercent: 100, confidence: 95, listType: 'whitelist', result: {}, summary: 'Trang nằm trong danh sách tin cậy.', url: urlString, scanSource: 'CUSTOM_URL', updatedAt: Date.now() });
+          return;
+        }
+
+        // 2. Kiểm tra blacklist ngay
+        if (_isKnownBadUrl(urlString)) {
+          await setUrlScanResult(urlString, { status: 'SUCCESS', isPhish: true, legitimatePercent: 5, confidence: 95, result: {}, summary: 'URL nằm trong danh sách đen đã xác nhận.', url: urlString, scanSource: 'CUSTOM_URL', updatedAt: Date.now() });
+          return;
+        }
+
+        // 3. Kiểm tra cache LIVE (kết quả từ lần realtime scan trước)
+        const cached = await getUrlCache(urlString, 'LIVE');
+        if (cached) {
+          await setUrlScanResult(urlString, { status: 'SUCCESS', ...cached, url: urlString, scanSource: 'CUSTOM_URL', updatedAt: Date.now() });
+          return;
+        }
+
+        // 4. Đánh dấu đang quét
+        await setUrlScanResult(urlString, { status: 'ANALYZING', isPhish: false, legitimatePercent: null, confidence: 0, result: {}, url: urlString, scanSource: 'CUSTOM_URL', updatedAt: Date.now() });
+
+        // 5. Khởi động Hidden Tab Deep Scan — engine y hệt Realtime
+        await startHiddenTabScan(urlString);
+
       } catch (err) {
-        logger.error(`[FAILED] ${urlString}:`, err);
-        await setUrlScanResult(urlString, { status: 'FAILED', isPhish: false, legitimatePercent: null, confidence: 0, result: {}, url: urlString, scanSource: 'CUSTOM_URL' });
+        logger.error(`[SCAN_URL FAILED] ${urlString}:`, err);
+        await setUrlScanResult(urlString, { status: 'FAILED', isPhish: false, legitimatePercent: null, confidence: 0, result: {}, url: urlString, scanSource: 'CUSTOM_URL', updatedAt: Date.now() });
       }
     })();
     return true;
@@ -997,6 +1076,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 });
 
+
+
+
 // Redirect chain tracking
 chrome.webRequest.onBeforeRequest.addListener((details) => {
   if (details.type === 'main_frame' && details.tabId >= 0) { redirectChains.set(details.tabId, [details.url]); }
@@ -1008,12 +1090,39 @@ chrome.webRequest.onBeforeRedirect.addListener((details) => {
   }
 }, { urls: ['*://*/*'], types: ['main_frame'] });
 
-chrome.tabs.onRemoved.addListener((tabId) => { removeTabState(tabId); redirectChains.delete(tabId); riskBlockAllowUntil.delete(tabId); });
+chrome.tabs.onRemoved.addListener((tabId) => {
+  redirectChains.delete(tabId);
+  riskBlockAllowUntil.delete(tabId);
+  // Nếu tab bị đóng, hãy finalize để kết quả không bị mất. Không xoá tabState vội để classify chạy xong.
+  if (deepScanTabs.has(tabId)) {
+    const meta = deepScanTabs.get(tabId);
+    if (meta.dwellTimer) clearTimeout(meta.dwellTimer);
+    if (meta.hardTimeout) clearTimeout(meta.hardTimeout);
+    finalizeDeepScan(tabId).catch(() => {});
+  } else {
+    removeTabState(tabId);
+  }
+});
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === 'loading' && changeInfo.url) {
     redirectChains.set(tabId, [changeInfo.url]);
-    setTabState(tabId, { status: ANALYSIS_STATUS.ANALYZING, result: null, url: changeInfo.url, isPhish: false, legitimatePercent: null }).catch(()=>{});
+    // Không đưa deepScan tab về ANALYZING khi load lại — giữ nguyên trạng thái
+    if (!deepScanTabs.has(tabId)) {
+      setTabState(tabId, { status: ANALYSIS_STATUS.ANALYZING, result: null, url: changeInfo.url, isPhish: false, legitimatePercent: null }).catch(()=>{});
+    }
+  }
+  // Khi deepScan tab load xong: bắt đầu Dwell Timer
+  if (changeInfo.status === 'complete' && deepScanTabs.has(tabId)) {
+    const meta = deepScanTabs.get(tabId);
+    if (!meta.dwellTimer) {
+      logger.info(`[DEEP_SCAN_DWELL_START] tabId=${tabId} url=${meta.url}`);
+      meta.dwellTimer = setTimeout(() => {
+        logger.info(`[DEEP_SCAN_DWELL_DONE] tabId=${tabId}`);
+        if (meta.hardTimeout) clearTimeout(meta.hardTimeout);
+        try { chrome.tabs.remove(tabId); } catch(e) {}
+      }, DEEP_SCAN_DWELL_MS); // dwell để tích lũy behavioral signals
+    }
   }
 });
 

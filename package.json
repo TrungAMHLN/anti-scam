@@ -9,7 +9,7 @@
     "apps/*"
   ],
   "scripts": {
-    "sync:shared": "node -e \"const fs=require('fs');fs.rmSync('apps/extension/scripts/shared',{recursive:true,force:true});fs.mkdirSync('apps/extension/scripts/shared',{recursive:true});for(const f of ['heuristic.js','features.js'])fs.copyFileSync('packages/'+f,'apps/extension/scripts/shared/'+f);console.log('synced packages/*.js -> apps/extension/scripts/shared/');\"",
+    "sync:shared": "npm --prefix packages/core run build:cjs && node -e \"const fs=require('fs');fs.rmSync('apps/extension/scripts/shared',{recursive:true,force:true});fs.mkdirSync('apps/extension/scripts/shared',{recursive:true});fs.copyFileSync('packages/heuristic.js','apps/extension/scripts/shared/heuristic.js');fs.copyFileSync('packages/core/dist/features.iife.js','apps/extension/scripts/shared/features.js');console.log('synced: heuristic.js(proven) + features.iife.js -> apps/extension/scripts/shared');\"",
     "build:extension": "npm run sync:shared",
     "dev:extension":   "npm run sync:shared",
     "start:backend":   "npm --prefix backend start"

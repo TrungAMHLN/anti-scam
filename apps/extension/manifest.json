@@ -21,6 +21,15 @@
   "action": {
     "default_popup": "pages/popup/index.html"
   },
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "ruleset_1",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
   "content_scripts": [
     {
       "matches": [
@@ -31,7 +40,9 @@
         "scripts/vendor/jquery.js",
         "scripts/shared/features.js"
       ],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true
     }
   ],
   "web_accessible_resources": [
