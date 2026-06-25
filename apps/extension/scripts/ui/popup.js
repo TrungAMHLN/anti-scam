@@ -58,6 +58,9 @@ const activeAnalysis = {
   // ── Timestamps ──
   startedAt: null,
   completedAt: null,
+
+  // ── Stage ──
+  stage: null,               // 'QUICK' | 'LIVE' | null
 };
 
 /**
@@ -131,6 +134,7 @@ const resetAnalysisData = () => {
   activeAnalysis.reputation = null;
   activeAnalysis.loadingText = null;
   activeAnalysis.completedAt = null;
+  activeAnalysis.stage = null;
 };
 
 // Saved CURRENT_TAB analysis — khôi phục khi user nhấn Back
@@ -263,7 +267,7 @@ const renderResultState = () => {
     `explanations=${state.explanations ? state.explanations.map(e=>e.key).join(',') : 'null'} ` +
     `riskScore=${state.riskScore}`);
 
-  const { isWhiteList, isBlocked, isPhish, legitimatePercent, confidence, status, isUnknown } = state;
+  const { isWhiteList, isBlocked, isPhish, legitimatePercent, confidence, status, isUnknown, stage } = state;
 
   $('#pluginBody').show();
   $('#isSafe').hide();
@@ -306,9 +310,10 @@ const renderResultState = () => {
 
   const pctCls = `p${isValidPct ? pct : 0}`;
   pct_content.classList.add(pctCls); _dynClasses.pct.push(pctCls);
-  if (isPhish) { pct_content.classList.add('orange'); _dynClasses.pct.push('orange'); }
+  const showWarning = isPhish || (isValidPct && pct <= 55);
+  if (showWarning) { pct_content.classList.add('orange'); _dynClasses.pct.push('orange'); }
 
-  if (isPhish) {
+  if (showWarning) {
     site_score.classList.add('warning'); _dynClasses.score.push('warning');
     site_msg.classList.add('warning'); _dynClasses.msg.push('warning');
   } else {
@@ -320,7 +325,7 @@ const renderResultState = () => {
   if (status === 'OFFLINE') message = 'Không thể kết nối máy chủ phân tích.';
   else if (status === 'FAILED') message = 'Không thể phân tích trang này.';
   else if (isUnknown) message = 'Chưa đủ dữ liệu để đánh giá độ tin cậy.';
-  else message = isPhish ? 'Website có nguy cơ cao.' : 'Website đã được phân tích.';
+  else message = showWarning ? 'Website có nguy cơ cao.' : 'Website đã được phân tích.';
 
   $('#site_score').text(isValidPct ? `${pct}%` : '...');
 
@@ -341,7 +346,36 @@ const renderResultState = () => {
   } else {
     $('#site_msg').text('...');
   }
+  
+  // Render domain
   $('#domain_url').text(domain);
+  
+  // Render Stage Badge
+  $('.stage-badge-container').remove();
+  if (stage) {
+    const badgeText = stage === 'QUICK' ? '⚡ Quét sơ bộ' : '🔬 Quét toàn diện';
+    const badgeTitle = stage === 'QUICK' 
+      ? 'Chỉ phân tích URL/Domain. Chưa phân tích hành vi thực tế.' 
+      : 'Phân tích đầy đủ cấu trúc, liên kết và hành vi thực tế của trang web.';
+    const badgeCls = stage === 'QUICK' ? 'badge-quick' : 'badge-live';
+    
+    const badgeHtml = `<span class="stage-badge-container" title="${badgeTitle}"><span class="stage-badge ${badgeCls}">${badgeText}</span></span>`;
+    $('#domain_url').after(badgeHtml);
+  }
+  
+  // Warning note cho Quick Scan
+  $('.quick-scan-note').remove();
+  if (stage === 'QUICK') {
+    const noteLine = document.createElement('div');
+    noteLine.className = 'sub-note quick-scan-note';
+    noteLine.textContent = 'Kết quả này chỉ dựa trên phân tích cấu trúc URL. Truy cập website để phân tích đầy đủ hành vi thực tế.';
+    noteLine.style.color = '#fb923c';
+    noteLine.style.marginTop = '8px';
+    noteLine.style.padding = '4px 8px';
+    noteLine.style.background = 'rgba(251, 146, 60, 0.1)';
+    noteLine.style.borderRadius = '4px';
+    $('#site_msg').append(noteLine);
+  }
 };
 
 /**
@@ -700,7 +734,7 @@ const startCustomUrlScan = (rawUrl) => {
   activeAnalysis.startedAt = Date.now();
   resetAnalysisData();
   activeAnalysis.status = 'LOADING';
-  activeAnalysis.loadingText = 'Đang gửi yêu cầu quét...';
+  activeAnalysis.loadingText = 'Đang khởi tạo môi trường quét sâu... (Có thể mất 3-10 giây)';
 
   // ── BƯỚC 3: RENDER NGAY LẬP TỨC — UI chuyển HOÀN TOÀN sang URL mới ──
   renderActiveAnalysis();
@@ -777,7 +811,7 @@ const startCustomUrlScan = (rawUrl) => {
           return;
         }
 
-        if (!state || state.status === 'ANALYZING' || state.status === 'IDLE') {
+        if (!state || state.status === 'ANALYZING' || state.status === 'IDLE' || state.isInterim) {
           scanAttempts++;
 
           // ✅ Cập nhật loading text qua activeAnalysis
@@ -785,6 +819,7 @@ const startCustomUrlScan = (rawUrl) => {
             let loadingText = 'Đang phân tích...';
             if (scanAttempts < 3) loadingText = 'Đang tải trang...';
             else if (scanAttempts < 8) loadingText = 'Đang thu thập dữ liệu...';
+            else if (state && state.isInterim) loadingText = 'Đang phân tích sâu hành vi (có thể mất vài giây)...';
             else loadingText = 'Đang phân tích...';
             updateAnalysis({ status: 'ANALYZING', loadingText });
           }

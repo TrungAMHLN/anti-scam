@@ -23,3 +23,6 @@ export * from './compute-score.js';
 
 // HTML signal parser (pure, no DOM)
 export * from './signals.js';
+
+// DOM features collector (pure, no Chrome APIs)
+export * from './features.js';

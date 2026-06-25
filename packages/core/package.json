@@ -14,5 +14,13 @@
   },
   "files": [
     "src/"
-  ]
-}
+  ],
+  "scripts": {
+    "build:cjs": "npx esbuild src/index.js --bundle --format=cjs --outfile=dist/index.cjs",
+    "build:iife": "npx esbuild src/extension/heuristic-runner.js --bundle --format=iife --outfile=dist/heuristic.iife.js && npx esbuild src/extension/features-runner.js --bundle --format=iife --outfile=dist/features.iife.js",
+    "build": "npm run build:cjs && npm run build:iife"
+  },
+  "devDependencies": {
+    "esbuild": "^0.21.0"
+  }
+}

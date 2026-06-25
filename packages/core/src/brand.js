@@ -1,7 +1,7 @@
 // ============================================================
 // @anti-scam/core — Brand detection, typosquat, homograph
 // ============================================================
-import { BRANDS, CONFUSABLES, SHORT_BRAND_KEYS } from './constants.js';
+import { BRANDS, SHORT_BRAND_KEYS } from './constants.js';
 
 // ── Punycode decoder (minimal RFC3492) ──
 const punycodeDecodeLabel = (input) => {

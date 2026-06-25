@@ -316,3 +316,49 @@ export const computeHeuristicScore = (urlString) => {
   const r = computeScore(urlString, {});
   return { score: r.riskScore, flags: [], riskLevel: r.riskLevel };
 };
+
+// ─── Quick / Live scan variants ────────────────────────────────────────────
+
+export const buildQuickScanSummary = (assessment) => {
+  const { riskScore, isUnknown, findings } = assessment;
+  const hasCritical = (findings || []).some(f =>
+    ['MalwareReputation','CommunityReport','Homograph','Typosquat','BrandInDomain',
+     'FormHijack','DangerousDownload','OpenRedirect'].includes(f.key)
+  );
+  if (hasCritical || riskScore >= 55) {
+    const firstDanger = (findings || []).slice().sort((a,b)=>b.points-a.points).find(f => f.points >= 14);
+    return `Phát hiện nguy cơ rõ ràng từ phân tích URL/domain. ${ firstDanger ? firstDanger.label : 'Hãy thận trọng.' }`;
+  }
+  if (riskScore >= 30) return `Có dấu hiệu đáng ngờ từ phân tích sơ bộ. Chưa phân tích hành vi thực tế của website.`;
+  if (isUnknown) return `Chưa đủ dữ liệu để đánh giá. Đây là phân tích sơ bộ — chưa kiểm tra JavaScript và hành vi website.`;
+  return `Chưa phát hiện nguy cơ rõ ràng từ URL và domain. Đây là đánh giá sơ bộ — chưa phân tích hành vi thực tế của website.`;
+};
+
+export const buildLiveScanSummary = (assessment) => assessment.summary;
+
+/**
+ * Quick Scan — Static Analysis only (Custom URL Scan, fetch-based, no real tab)
+ * Confidence capped at 50% — no real DOM/behavior signals.
+ */
+export const computeQuickScore = (urlString, ctx = {}) => {
+  const result = computeScore(urlString, ctx);
+  return {
+    ...result,
+    stage: 'QUICK',
+    confidence: Math.min(result.confidence, 50),
+    summary: buildQuickScanSummary(result),
+  };
+};
+
+/**
+ * Live Scan — Dynamic Analysis (user visits a real tab, content script injected)
+ * Full confidence, more accurate summary.
+ */
+export const computeLiveScore = (urlString, ctx = {}) => {
+  const result = computeScore(urlString, ctx);
+  return {
+    ...result,
+    stage: 'LIVE',
+    summary: buildLiveScanSummary(result),
+  };
+};
